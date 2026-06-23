@@ -1,7 +1,2 @@
-./FeCoNiCrMn11111-org.cif
-./HEA_FeCoNiCrMn_111_sqs.cif
-./HEA_FeCoNiCrMn_111_sqs.dat
-./test_random.cif
-./test_sqs-opt.cif
-./test-sqs-opt.dat
-./test_sqs.cif
+*.cif
+*.dat

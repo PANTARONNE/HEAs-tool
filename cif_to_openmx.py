@@ -43,11 +43,14 @@ import sys
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# OpenMX 2019 "standard" PAO/VPS recommendation for common elements.
-#   symbol -> (PAO basis, VPS pseudopotential, number of valence electrons)
-# The magnetic 3d metals use the hard ("H") variants, which include the 3s/3p
-# semicore states (hence valence = 14..20). Add more elements here as needed.
-# Verify the filenames against your installed DFT_DATA directory.
+# PAO basis / VPS pseudopotential / valence electrons, matched to the files
+# actually present in ./DFT_DATA19 (PAO/*.pao, VPS/*.vps; valences taken from
+# DFT_DATA19/vps_info.txt). Note that in this library Cr and Mn ship ONLY the
+# regular variant (Cr6.0/Mn6.0, Cr_PBE19/Mn_PBE19) -- there is no "H" version,
+# whereas Fe/Co/Ni/Cu/Zn use the hard ("H") variants. The s3p2d1 contraction
+# is a light "standard" choice; bump the d/f count (e.g. s3p2d2) for accuracy.
+# Add more elements as needed, then re-run -- the on-disk check below validates
+# every name against the library before writing the input.
 # ---------------------------------------------------------------------------
 SPECIES_DB = {
     # light / main-group (subset)
@@ -61,11 +64,11 @@ SPECIES_DB = {
     "Si": ("Si7.0-s2p2d1",   "Si_PBE19",   4.0),
     "P":  ("P7.0-s2p2d1",    "P_PBE19",    5.0),
     "S":  ("S7.0-s2p2d1",    "S_PBE19",    6.0),
-    # 3d transition metals (hard variants, with 3s/3p semicore)
+    # 3d transition metals (matched to DFT_DATA19)
     "Ti": ("Ti7.0-s3p2d1",   "Ti_PBE19",  12.0),
     "V":  ("V6.0-s3p2d1",    "V_PBE19",   13.0),
-    "Cr": ("Cr6.0H-s3p2d1",  "Cr_PBE19H", 14.0),
-    "Mn": ("Mn6.0H-s3p2d1",  "Mn_PBE19H", 15.0),
+    "Cr": ("Cr6.0-s3p2d1",   "Cr_PBE19",  14.0),  # no H variant in this library
+    "Mn": ("Mn6.0-s3p2d1",   "Mn_PBE19",  15.0),  # no H variant in this library
     "Fe": ("Fe6.0H-s3p2d1",  "Fe_PBE19H", 16.0),
     "Co": ("Co6.0H-s3p2d1",  "Co_PBE19H", 17.0),
     "Ni": ("Ni6.0H-s3p2d1",  "Ni_PBE19H", 18.0),
@@ -92,8 +95,10 @@ def parse_args(argv=None):
         help="Output .dat filename. Defaults to <cif-stem>.dat.",
     )
     p.add_argument(
-        "--data-path", default="/path/to/openmx/DFT_DATA19",
-        help="OpenMX DFT_DATA directory written as DATA.PATH in the .dat file.",
+        "--data-path", required=True,
+        help="REQUIRED. Server-side OpenMX DFT_DATA directory (where OpenMX will "
+             "run), written verbatim as DATA.PATH in the .dat file, "
+             "e.g. /home/user/openmx3.9/DFT_DATA19.",
     )
     p.add_argument(
         "--xc", default="GGA-PBE",
@@ -309,9 +314,6 @@ def main(argv=None):
     print(f"k-grid        : {kgrid[0]} {kgrid[1]} {kgrid[2]}")
     print(f"Energy cutoff : {args.energycutoff} Ry")
     print("=" * 64)
-    if args.data_path.startswith("/path/to/"):
-        print("[warn] DATA.PATH is still the placeholder; set --data-path to "
-              "your DFT_DATA directory before running OpenMX.")
     print("Run with, e.g.:  mpirun -np <N> openmx "
           f"{args.output} > {system_name}.std")
     print(f"H/S matrices will be written to: {system_name}.scfout")

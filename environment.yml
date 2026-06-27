@@ -1,0 +1,10 @@
+name: heas-tool
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - matplotlib
+  - ase
+  - icet
+  - pip

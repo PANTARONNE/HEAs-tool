@@ -24,7 +24,10 @@ import sys
 import numpy as np
 
 
-METALS_DEFAULT = {"Fe", "Co", "Ni", "Cr", "Mn", "Cu", "Pd", "Pt", "Rh", "Ir"}
+METALS_DEFAULT = {
+    "Fe", "Co", "Ni", "Cu", "Mo", "Zn", "Ga", "In", "Sn", "W",
+    "Cr", "Mn", "Pd", "Pt", "Rh", "Ir",
+}
 ADSORBATES = {"N", "NH", "NH2", "NH3"}
 
 

@@ -49,8 +49,7 @@ import numpy as np
 # regular variant (Cr6.0/Mn6.0, Cr_PBE19/Mn_PBE19) -- there is no "H" version,
 # whereas Fe/Co/Ni/Cu/Zn use the hard ("H") variants. The s3p2d1 contraction
 # is a light "standard" choice; bump the d/f count (e.g. s3p2d2) for accuracy.
-# Add more elements as needed, then re-run -- the on-disk check below validates
-# every name against the library before writing the input.
+# Add more elements as needed, then re-run.
 # ---------------------------------------------------------------------------
 SPECIES_DB = {
     # light / main-group (subset)
@@ -74,6 +73,12 @@ SPECIES_DB = {
     "Ni": ("Ni6.0H-s3p2d1",  "Ni_PBE19H", 18.0),
     "Cu": ("Cu6.0H-s3p2d1",  "Cu_PBE19H", 19.0),
     "Zn": ("Zn6.0H-s3p2d1",  "Zn_PBE19H", 20.0),
+    # 4d/5d transition metals and post-transition metals requested for HEAs.
+    "Mo": ("Mo7.0-s3p2d1",   "Mo_PBE19",  14.0),
+    "W":  ("W7.0-s3p2d1",    "W_PBE19",   12.0),
+    "Ga": ("Ga7.0-s2p2d1",   "Ga_PBE19",  13.0),
+    "In": ("In7.0-s2p2d1",   "In_PBE19",  13.0),
+    "Sn": ("Sn7.0-s2p2d1",   "Sn_PBE19",  14.0),
 }
 
 # Rough ferromagnetic initial moments (mu_B) used only to seed the SCF; the

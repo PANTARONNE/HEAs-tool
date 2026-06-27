@@ -47,11 +47,12 @@ from ase.io import write
 FCC_LATTICE_CONSTANTS = {
     "Al": 4.05, "Ni": 3.52, "Cu": 3.61, "Pd": 3.89, "Ag": 4.09,
     "Pt": 3.92, "Au": 4.08, "Pb": 4.95, "Rh": 3.80, "Ir": 3.84,
+    "Ga": 4.51, "In": 4.59, "Sn": 4.89,
     # The following are not FCC in their ground state; the values are common
     # equivalent-FCC lattice-constant estimates used as an approximate
     # template inside an HEA solid solution.
     "Fe": 3.59, "Co": 3.54, "Cr": 3.62, "Mn": 3.78, "Ti": 4.08,
-    "V": 3.78, "Zn": 3.94,
+    "V": 3.78, "Mo": 3.86, "W": 3.93, "Zn": 3.94,
 }
 DEFAULT_A = 3.6  # default lattice constant (Angstrom) when no element is known
 

@@ -1,0 +1,28 @@
+SYSTEM = HEA_FCC111_relax
+
+# Electronic structure
+ENCUT  = 500
+PREC   = Accurate
+ISPIN  = 2
+
+# Electronic convergence
+EDIFF  = 1E-5
+NELM   = 120
+ALGO   = Normal
+
+# Ionic relaxation
+IBRION = 2
+NSW    = 200
+ISIF   = 2
+EDIFFG = -0.02
+POTIM = 0.1
+
+# Smearing for metallic HEA slab
+ISMEAR = 1
+SIGMA  = 0.20
+
+# Projection / output
+LREAL  = Auto
+LWAVE  = .FALSE.
+LCHARG = .FALSE.
+NWRITE = 1

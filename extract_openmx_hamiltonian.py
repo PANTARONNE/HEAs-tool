@@ -465,18 +465,18 @@ def write_basis_jsonl(path, basis):
 
 def register_export(args, n_surface_atoms, spin_channels_count):
     db = Path(args.dataset_root) / "index.sqlite"
-    if not db.is_file() or not args.surface_id or not args.sample_id:
+    if not db.is_file() or not args.surface_id:
         return
     with sqlite3.connect(db) as con:
         con.execute(
             """
             INSERT INTO hamiltonian_exports(
-                surface_id, sample_id, scfout_path, output_npz, n_surface_atoms,
+                surface_id, scfout_path, output_npz, n_surface_atoms,
                 spin_channels, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                args.surface_id, args.sample_id, str(args.scfout), str(args.output),
+                args.surface_id, str(args.scfout), str(args.output),
                 n_surface_atoms, spin_channels_count, utc_now(),
             ),
         )
@@ -504,7 +504,6 @@ def main(argv=None):
     )
     p.add_argument("--dataset-root", default="dataset")
     p.add_argument("--surface-id", default=None)
-    p.add_argument("--sample-id", default=None)
     args = p.parse_args(argv)
 
     species_basis, atoms = parse_dat(args.dat)

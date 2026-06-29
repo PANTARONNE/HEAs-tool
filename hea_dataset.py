@@ -5,15 +5,16 @@ Dataset manager for HEA surface training data.
 
 The dataset identity follows the convention requested for this project:
 
-    surface_id = element names + element fractions only
-    sample_id  = one concrete structure under that composition
+    surface_id = element names + atom counts only
+    surface_id = one concrete structure for that composition
 
 All structural files are kept on disk, while the searchable state lives in a
-SQLite index. Per-sample metadata is also written as JSONL/NPY files so that
+SQLite index. Per-surface metadata is also written as JSONL/NPY files so that
 training code can load it without going through SQL.
 """
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -26,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METALS_DEFAULT = [
     "Fe", "Co", "Ni", "Cu", "Mo", "Zn", "Ga", "In", "Sn", "W",
     "Cr", "Mn", "Pd", "Pt", "Rh", "Ir",
@@ -69,42 +70,25 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def parse_composition(items):
-    pairs = []
-    for item in items:
-        if "=" not in item:
-            raise SystemExit(
-                f"[error] Bad composition entry '{item}', expected EL=FRACTION."
-            )
-        element, value = item.split("=", 1)
-        element = element.strip()
-        if not element:
-            raise SystemExit(f"[error] Bad composition entry '{item}'.")
-        try:
-            fraction = float(value)
-        except ValueError:
-            raise SystemExit(f"[error] Bad fraction in '{item}'.")
-        if fraction < 0:
-            raise SystemExit(f"[error] Fraction must be non-negative in '{item}'.")
-        pairs.append((element, fraction))
-
-    total = sum(v for _, v in pairs)
-    if total <= 0:
-        raise SystemExit("[error] Composition fractions must sum to > 0.")
-    return [(el, 100.0 * value / total) for el, value in pairs]
-
-
-def format_fraction(value):
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    return text if text else "0"
-
-
 def surface_id_from_composition(composition):
     # Preserve user-specified element order; it usually follows the alloy name.
-    return "-".join(f"{el}_{format_fraction(frac)}" for el, frac in composition)
+    return "-".join(f"{el}_{count}" for el, count in composition)
 
 
-def dataset_paths(root, surface_id=None, sample_id=None):
+def composition_from_cif(path):
+    """Return deterministic element atom counts from a CIF."""
+    atoms = read_cif(path)
+    counts = Counter(atoms.get_chemical_symbols())
+    if not counts:
+        raise SystemExit(f"[error] CIF contains no atoms: {path}")
+    return [(element, counts[element]) for element in sorted(counts)]
+
+
+def compositions_match(left, right):
+    return dict(left) == dict(right)
+
+
+def dataset_paths(root, surface_id=None):
     root = Path(root)
     paths = {
         "root": root,
@@ -112,16 +96,14 @@ def dataset_paths(root, surface_id=None, sample_id=None):
         "manifest": root / "dataset_manifest.json",
     }
     if surface_id:
-        paths["surface"] = root / "surfaces" / surface_id
-    if surface_id and sample_id:
-        sample = root / "surfaces" / surface_id / sample_id
+        surface = root / surface_id
         paths.update({
-            "sample": sample,
-            "structures": sample / "structures",
-            "metadata": sample / "metadata",
-            "openmx_slab": sample / "openmx_slab",
-            "adsorbates": sample / "adsorbates",
-            "sample_manifest": sample / "manifest.json",
+            "surface": surface,
+            "structures": surface / "structures",
+            "metadata": surface / "metadata",
+            "openmx_slab": surface / "openmx_slab",
+            "adsorbates": surface / "adsorbates",
+            "surface_manifest": surface / "manifest.json",
         })
     return paths
 
@@ -134,6 +116,16 @@ def init_db(root):
     paths = dataset_paths(root)
     paths["root"].mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(paths["db"]) as con:
+        old_version = con.execute(
+            "SELECT value FROM dataset_info WHERE key='schema_version'"
+        ).fetchone() if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_info'"
+        ).fetchone() else None
+        if old_version and int(old_version[0]) != SCHEMA_VERSION:
+            raise SystemExit(
+                f"[error] Dataset schema v{old_version[0]} is incompatible with v{SCHEMA_VERSION}. "
+                "Use a new dataset root or migrate the existing dataset explicitly."
+            )
         con.executescript(
             """
             PRAGMA foreign_keys = ON;
@@ -146,37 +138,26 @@ def init_db(root):
             CREATE TABLE IF NOT EXISTS surfaces (
                 surface_id TEXT PRIMARY KEY,
                 composition_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS samples (
-                surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 path TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'created',
                 initial_cif TEXT,
                 relaxed_cif TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (surface_id, sample_id),
-                FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS artifacts (
                 artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 path TEXT NOT NULL,
                 sha256 TEXT,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (surface_id, sample_id)
-                    REFERENCES samples(surface_id, sample_id)
+                FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
             );
 
             CREATE TABLE IF NOT EXISTS top_atoms (
                 surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 atom_id TEXT NOT NULL,
                 row INTEGER NOT NULL,
                 col INTEGER NOT NULL,
@@ -190,14 +171,12 @@ def init_db(root):
                 relaxed_x REAL,
                 relaxed_y REAL,
                 relaxed_z REAL,
-                PRIMARY KEY (surface_id, sample_id, atom_id),
-                FOREIGN KEY (surface_id, sample_id)
-                    REFERENCES samples(surface_id, sample_id)
+                PRIMARY KEY (surface_id, atom_id),
+                FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
             );
 
             CREATE TABLE IF NOT EXISTS fcc_sites (
                 surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 site_id TEXT NOT NULL,
                 site_index INTEGER NOT NULL,
                 row INTEGER NOT NULL,
@@ -211,15 +190,13 @@ def init_db(root):
                 top_atom_ids_json TEXT NOT NULL,
                 adsorption_energy_eV REAL,
                 energy_status TEXT NOT NULL DEFAULT 'empty',
-                PRIMARY KEY (surface_id, sample_id, site_id),
-                FOREIGN KEY (surface_id, sample_id)
-                    REFERENCES samples(surface_id, sample_id)
+                PRIMARY KEY (surface_id, site_id),
+                FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
             );
 
             CREATE TABLE IF NOT EXISTS adsorbate_configs (
                 config_id TEXT PRIMARY KEY,
                 surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 site_id TEXT NOT NULL,
                 adsorbate TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -228,21 +205,19 @@ def init_db(root):
                 adsorption_energy_eV REAL,
                 energy_status TEXT NOT NULL DEFAULT 'empty',
                 updated_at TEXT NOT NULL,
-                FOREIGN KEY (surface_id, sample_id, site_id)
-                    REFERENCES fcc_sites(surface_id, sample_id, site_id)
+                FOREIGN KEY (surface_id, site_id)
+                    REFERENCES fcc_sites(surface_id, site_id)
             );
 
             CREATE TABLE IF NOT EXISTS hamiltonian_exports (
                 export_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 surface_id TEXT NOT NULL,
-                sample_id TEXT NOT NULL,
                 scfout_path TEXT NOT NULL,
                 output_npz TEXT NOT NULL,
                 n_surface_atoms INTEGER NOT NULL,
                 spin_channels INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (surface_id, sample_id)
-                    REFERENCES samples(surface_id, sample_id)
+                FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
             );
             """
         )
@@ -255,8 +230,8 @@ def init_db(root):
     write_json(paths["manifest"], {
         "schema_version": SCHEMA_VERSION,
         "created_or_updated_at": utc_now(),
-        "layout": "surfaces/<surface_id>/<sample_id>",
-        "surface_id_rule": "element_fraction_pairs_only",
+        "layout": "<surface_id>",
+        "surface_id_rule": "element_atom_count_pairs_only",
     })
     print(f"[done] Initialized dataset at {paths['root']}")
 
@@ -273,12 +248,37 @@ def copy_if_requested(src, dst):
 
 
 def create_sample(args):
-    init_db(args.root)
-    composition = parse_composition(args.composition)
-    surface_id = args.surface_id or surface_id_from_composition(composition)
-    sample_id = args.sample_id
+    cif_paths = [path for path in (args.initial_cif, args.relaxed_cif) if path]
+    inferred = [composition_from_cif(path) for path in cif_paths]
+    if len(inferred) == 2 and not compositions_match(inferred[0], inferred[1]):
+        raise SystemExit(
+            "[error] Initial and relaxed CIF files have different compositions."
+        )
 
-    paths = dataset_paths(args.root, surface_id, sample_id)
+    if not inferred:
+        raise SystemExit(
+            "[error] Provide --initial-cif or --relaxed-cif to infer composition."
+        )
+    composition = inferred[0]
+
+    surface_id = surface_id_from_composition(composition)
+    paths = dataset_paths(args.root, surface_id)
+    db_path = dataset_paths(args.root)["db"]
+    db_exists = False
+    if db_path.is_file():
+        with sqlite3.connect(db_path) as con:
+            if con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='surfaces'"
+            ).fetchone():
+                db_exists = con.execute(
+                    "SELECT 1 FROM surfaces WHERE surface_id=?", (surface_id,)
+                ).fetchone() is not None
+    if db_exists or paths["surface"].exists():
+        raise SystemExit(
+            f"[error] Composition already exists in dataset: {surface_id}"
+        )
+
+    init_db(args.root)
     for key in ("structures", "metadata", "openmx_slab", "adsorbates"):
         paths[key].mkdir(parents=True, exist_ok=True)
 
@@ -291,55 +291,44 @@ def create_sample(args):
 
     manifest = {
         "surface_id": surface_id,
-        "sample_id": sample_id,
-        "composition": [{"element": el, "fraction_percent": frac}
-                        for el, frac in composition],
+        "composition": [{"element": el, "atom_count": count}
+                        for el, count in composition],
         "created_at": utc_now(),
         "files": {
-            "initial_cif": relpath_or_none(initial, paths["sample"]),
-            "relaxed_cif": relpath_or_none(relaxed, paths["sample"]),
+            "initial_cif": relpath_or_none(initial, paths["surface"]),
+            "relaxed_cif": relpath_or_none(relaxed, paths["surface"]),
             "top_atoms": "metadata/top_atoms.jsonl",
             "fcc_sites": "metadata/fcc_sites.jsonl",
             "atom_grid": "metadata/atom_grid.npy",
             "site_grid": "metadata/site_grid.npy",
         },
     }
-    write_json(paths["sample_manifest"], manifest)
+    write_json(paths["surface_manifest"], manifest)
 
     with connect_db(args.root) as con:
         con.execute(
-            "INSERT OR IGNORE INTO surfaces(surface_id, composition_json, created_at) "
-            "VALUES (?, ?, ?)",
-            (surface_id, json.dumps(manifest["composition"]), utc_now()),
-        )
-        con.execute(
-            """
-            INSERT OR REPLACE INTO samples(
-                surface_id, sample_id, path, status, initial_cif, relaxed_cif,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                surface_id, sample_id, str(paths["sample"]),
-                "created", relpath_or_none(initial, paths["sample"]),
-                relpath_or_none(relaxed, paths["sample"]), utc_now(), utc_now(),
-            ),
+            """INSERT INTO surfaces(
+                surface_id, composition_json, path, status, initial_cif,
+                relaxed_cif, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (surface_id, json.dumps(manifest["composition"]), str(paths["surface"]),
+             "created", relpath_or_none(initial, paths["surface"]),
+             relpath_or_none(relaxed, paths["surface"]), utc_now(), utc_now()),
         )
         for kind, artifact in (("initial_cif", initial), ("relaxed_cif", relaxed)):
             if artifact is not None:
                 con.execute(
                     """
-                    INSERT INTO artifacts(surface_id, sample_id, kind, path, sha256, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO artifacts(surface_id, kind, path, sha256, created_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        surface_id, sample_id, kind,
-                        str(artifact), sha256_file(artifact), utc_now(),
+                        surface_id, kind, str(artifact), sha256_file(artifact), utc_now(),
                     ),
                 )
         con.commit()
 
-    print(f"[done] Created sample {surface_id}/{sample_id}")
+    print(f"[done] Created composition {surface_id}")
 
 
 def relpath_or_none(path, base):
@@ -448,7 +437,7 @@ def assign_xy_grid(items, xy_getter):
 
 
 def index_surface(args):
-    paths = dataset_paths(args.root, args.surface_id, args.sample_id)
+    paths = dataset_paths(args.root, args.surface_id)
     initial_cif = Path(args.initial_cif or paths["structures"] / "00_initial_sqs.cif")
     relaxed_cif = Path(args.relaxed_cif or paths["structures"] / "01_relaxed_slab.cif")
     initial_atoms = read_cif(initial_cif)
@@ -479,7 +468,6 @@ def index_surface(args):
         atom_grid[row, col] = atom_id
         item = {
             "surface_id": args.surface_id,
-            "sample_id": args.sample_id,
             "atom_id": atom_id,
             "row": row,
             "col": col,
@@ -515,20 +503,19 @@ def index_surface(args):
 
     with connect_db(args.root) as con:
         con.execute(
-            "DELETE FROM top_atoms WHERE surface_id=? AND sample_id=?",
-            (args.surface_id, args.sample_id),
+            "DELETE FROM top_atoms WHERE surface_id=?", (args.surface_id,),
         )
         for item in rows:
             con.execute(
                 """
                 INSERT INTO top_atoms(
-                    surface_id, sample_id, atom_id, row, col, element,
+                    surface_id, atom_id, row, col, element,
                     initial_ase_index, relaxed_ase_index, openmx_atom_index,
                     initial_x, initial_y, initial_z, relaxed_x, relaxed_y, relaxed_z
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item["surface_id"], item["sample_id"], item["atom_id"],
+                    item["surface_id"], item["atom_id"],
                     item["row"], item["col"], item["element"],
                     item["initial_ase_index"], item["relaxed_ase_index"],
                     item["openmx_atom_index"], item["initial_x"], item["initial_y"],
@@ -537,8 +524,8 @@ def index_surface(args):
                 ),
             )
         con.execute(
-            "UPDATE samples SET status=?, updated_at=? WHERE surface_id=? AND sample_id=?",
-            ("surface_indexed", utc_now(), args.surface_id, args.sample_id),
+            "UPDATE surfaces SET status=?, updated_at=? WHERE surface_id=?",
+            ("surface_indexed", utc_now(), args.surface_id),
         )
         con.commit()
 
@@ -551,7 +538,7 @@ def detect_sites(args):
     except ImportError as exc:
         raise SystemExit(f"[error] Could not import add_fcc_adsorbate.py: {exc}")
 
-    paths = dataset_paths(args.root, args.surface_id, args.sample_id)
+    paths = dataset_paths(args.root, args.surface_id)
     cif = Path(args.cif or paths["structures"] / "01_relaxed_slab.cif")
     atoms = ads.read_cif(str(cif))
     atoms.set_pbc(True)
@@ -586,7 +573,6 @@ def detect_sites(args):
         px, py, pz = [float(v) for v in site["plane_pos"]]
         rows.append({
             "surface_id": args.surface_id,
-            "sample_id": args.sample_id,
             "site_id": site_id,
             "site_index": i,
             "row": row,
@@ -611,20 +597,19 @@ def detect_sites(args):
 
     with connect_db(args.root) as con:
         con.execute(
-            "DELETE FROM fcc_sites WHERE surface_id=? AND sample_id=?",
-            (args.surface_id, args.sample_id),
+            "DELETE FROM fcc_sites WHERE surface_id=?", (args.surface_id,),
         )
         for item in rows:
             con.execute(
                 """
                 INSERT INTO fcc_sites(
-                    surface_id, sample_id, site_id, site_index, row, col,
+                    surface_id, site_id, site_index, row, col,
                     site_type, frac_x, frac_y, plane_x, plane_y, plane_z,
                     top_atom_ids_json, adsorption_energy_eV, energy_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item["surface_id"], item["sample_id"], item["site_id"],
+                    item["surface_id"], item["site_id"],
                     item["site_index"], item["row"], item["col"],
                     item["site_type"], item["frac_x"], item["frac_y"],
                     item["plane_x"], item["plane_y"], item["plane_z"],
@@ -633,8 +618,8 @@ def detect_sites(args):
                 ),
             )
         con.execute(
-            "UPDATE samples SET status=?, updated_at=? WHERE surface_id=? AND sample_id=?",
-            ("sites_detected", utc_now(), args.surface_id, args.sample_id),
+            "UPDATE surfaces SET status=?, updated_at=? WHERE surface_id=?",
+            ("sites_detected", utc_now(), args.surface_id),
         )
         con.commit()
 
@@ -642,20 +627,46 @@ def detect_sites(args):
 
 
 def create_adsorbate_records(args):
-    paths = dataset_paths(args.root, args.surface_id, args.sample_id)
+    try:
+        import add_fcc_adsorbate as ads
+    except ImportError as exc:
+        raise SystemExit(f"[error] Could not import add_fcc_adsorbate.py: {exc}")
+
+    paths = dataset_paths(args.root, args.surface_id)
+    relaxed_cif = paths["structures"] / "01_relaxed_slab.cif"
+    if not relaxed_cif.is_file():
+        raise SystemExit(
+            f"[error] Registered relaxed slab CIF not found: {relaxed_cif}"
+        )
+    slab = ads.read_cif(str(relaxed_cif))
+    slab.set_pbc(True)
+    normal = ads.normal_from_cell(slab.cell, args.side)
+
     fcc_rows = read_jsonl(paths["metadata"] / "fcc_sites.jsonl")
+    if not fcc_rows:
+        raise SystemExit("[error] No FCC site records found; run detect-sites first.")
     ads_root = paths["adsorbates"] / args.adsorbate
     ads_root.mkdir(parents=True, exist_ok=True)
 
     with connect_db(args.root) as con:
         for site in fcc_rows:
             site_id = site["site_id"]
-            config_id = f"{args.surface_id}_{args.sample_id}_{args.adsorbate}_{site_id}"
+            config_id = f"{args.surface_id}_{args.adsorbate}_{site_id}"
             config_path = ads_root / site_id
             config_path.mkdir(parents=True, exist_ok=True)
+            site_geometry = {
+                "plane_pos": np.array(
+                    [site["plane_x"], site["plane_y"], site["plane_z"]],
+                    dtype=float,
+                )
+            }
+            adsorbed = ads.add_adsorbate(
+                slab, site_geometry, args.adsorbate, normal, args.height, args.nh
+            )
+            initial_adsorbate_cif = config_path / "00_initial_adsorbate.cif"
+            ads.write_cif(str(initial_adsorbate_cif), adsorbed)
             record = {
                 "surface_id": args.surface_id,
-                "sample_id": args.sample_id,
                 "adsorbate": args.adsorbate,
                 "site_id": site_id,
                 "config_id": config_id,
@@ -669,14 +680,13 @@ def create_adsorbate_records(args):
             con.execute(
                 """
                 INSERT OR REPLACE INTO adsorbate_configs(
-                    config_id, surface_id, sample_id, site_id, adsorbate, path,
+                    config_id, surface_id, site_id, adsorbate, path,
                     initial_cif, relaxed_cif, adsorption_energy_eV, energy_status,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    config_id, args.surface_id, args.sample_id, site_id,
-                    args.adsorbate, str(config_path),
+                    config_id, args.surface_id, site_id, args.adsorbate, str(config_path),
                     "00_initial_adsorbate.cif", "01_relaxed_adsorbate.cif",
                     None, "empty", utc_now(),
                 ),
@@ -685,16 +695,87 @@ def create_adsorbate_records(args):
     print(f"[done] Created adsorbate records under {ads_root}")
 
 
+def validate_relaxed_adsorbate(initial_path, relaxed_path, clean_slab_path,
+                                max_displacement):
+    """Validate atom identity and adsorbate displacement after relaxation."""
+    from ase.geometry import find_mic
+
+    initial = read_cif(initial_path)
+    relaxed = read_cif(relaxed_path)
+    clean_slab = read_cif(clean_slab_path)
+    initial_symbols = initial.get_chemical_symbols()
+    relaxed_symbols = relaxed.get_chemical_symbols()
+    if len(initial) != len(relaxed):
+        raise SystemExit(
+            f"[error] Atom count changed during relaxation: "
+            f"{len(initial)} -> {len(relaxed)}."
+        )
+    if initial_symbols != relaxed_symbols:
+        raise SystemExit(
+            "[error] Relaxed adsorbate CIF does not preserve the initial atom order."
+        )
+
+    n_slab = len(clean_slab)
+    if n_slab >= len(initial):
+        raise SystemExit("[error] Initial adsorbate CIF contains no adsorbate atoms.")
+    if initial_symbols[:n_slab] != clean_slab.get_chemical_symbols():
+        raise SystemExit(
+            "[error] Initial adsorbate CIF substrate does not match the registered slab."
+        )
+
+    displacement_vectors, _ = find_mic(
+        relaxed.positions - initial.positions,
+        cell=initial.cell,
+        pbc=initial.pbc,
+    )
+    # Remove a rigid translation of the whole relaxed structure using the
+    # component-wise median displacement of substrate atoms.
+    substrate_shift = np.median(displacement_vectors[:n_slab], axis=0)
+    adsorbate_vectors = displacement_vectors[n_slab:] - substrate_shift
+    adsorbate_displacements = np.linalg.norm(adsorbate_vectors, axis=1)
+    maximum = float(np.max(adsorbate_displacements))
+    if maximum > max_displacement:
+        raise SystemExit(
+            f"[error] Adsorbate moved too far during relaxation: {maximum:.4f} A "
+            f"> allowed {max_displacement:.4f} A."
+        )
+    return {
+        "max_adsorbate_displacement_A": maximum,
+        "adsorbate_displacements_A": [
+            float(value) for value in adsorbate_displacements
+        ],
+        "max_allowed_adsorbate_displacement_A": float(max_displacement),
+    }
+
+
 def record_energy(args):
-    paths = dataset_paths(args.root, args.surface_id, args.sample_id)
-    config_path = paths["adsorbates"] / args.adsorbate / args.site_id
+    if args.max_adsorbate_displacement < 0:
+        raise SystemExit("[error] --max-adsorbate-displacement must be non-negative.")
+    if args.site_id < 1:
+        raise SystemExit("[error] --site-id must be a positive integer.")
+    site_id = f"site_{args.site_id:04d}"
+    paths = dataset_paths(args.root, args.surface_id)
+    config_path = paths["adsorbates"] / args.adsorbate / site_id
     energy_path = config_path / "adsorption_energy.json"
     if not energy_path.is_file():
         raise SystemExit(f"[error] Missing energy record: {energy_path}")
+    initial_path = config_path / "00_initial_adsorbate.cif"
+    clean_slab_path = paths["structures"] / "01_relaxed_slab.cif"
+    relaxed_source = Path(args.relaxed_cif)
+    validation = validate_relaxed_adsorbate(
+        initial_path, relaxed_source, clean_slab_path,
+        args.max_adsorbate_displacement,
+    )
+    relaxed_target = config_path / "01_relaxed_adsorbate.cif"
+    if relaxed_source.resolve() != relaxed_target.resolve():
+        shutil.copy2(relaxed_source, relaxed_target)
+
     with open(energy_path, "r", encoding="utf-8") as f:
         record = json.load(f)
+    record["relaxed_cif"] = "01_relaxed_adsorbate.cif"
     record["adsorption_energy_eV"] = args.energy
     record["energy_status"] = args.status
+    record["relaxation_validation"] = validation
     record["notes"] = args.notes or record.get("notes", "")
     write_json(energy_path, record)
 
@@ -703,29 +784,98 @@ def record_energy(args):
             """
             UPDATE adsorbate_configs
             SET adsorption_energy_eV=?, energy_status=?, updated_at=?
-            WHERE surface_id=? AND sample_id=? AND adsorbate=? AND site_id=?
+            WHERE surface_id=? AND adsorbate=? AND site_id=?
             """,
             (
                 args.energy, args.status, utc_now(), args.surface_id,
-                args.sample_id, args.adsorbate, args.site_id,
+                args.adsorbate, site_id,
             ),
         )
         con.execute(
             """
             UPDATE fcc_sites
             SET adsorption_energy_eV=?, energy_status=?
-            WHERE surface_id=? AND sample_id=? AND site_id=?
+            WHERE surface_id=? AND site_id=?
             """,
-            (args.energy, args.status, args.surface_id, args.sample_id, args.site_id),
+            (args.energy, args.status, args.surface_id, site_id),
         )
         con.commit()
-    print(f"[done] Recorded {args.energy} eV for {args.adsorbate}/{args.site_id}")
+    print(f"[done] Recorded {args.energy} eV for {args.adsorbate}/{site_id}")
 
 
-def add_common_sample_args(p):
+def extract_hamiltonian(args):
+    """Extract top-layer d-orbital Hamiltonian data for a registered surface."""
+    try:
+        import extract_openmx_hamiltonian as ex
+    except ImportError as exc:
+        raise SystemExit(
+            f"[error] Could not import extract_openmx_hamiltonian.py: {exc}"
+        )
+
+    paths = dataset_paths(args.root, args.surface_id)
+    top_atoms = paths["metadata"] / "top_atoms.jsonl"
+    if not top_atoms.is_file():
+        raise SystemExit(
+            f"[error] Top-atom metadata not found: {top_atoms}; run index-surface first."
+        )
+    dat_path = Path(args.dat)
+    scfout_path = Path(args.scfout)
+    output = Path(
+        args.output or paths["openmx_slab"] / "hamiltonian_d_surface.npz"
+    )
+
+    species_basis, atoms = ex.parse_dat(dat_path)
+    basis, offsets = ex.build_basis(atoms, species_basis)
+    scfout = ex.parse_scfout_binary(
+        scfout_path, expected_total_orbitals=len(basis)
+    )
+    top_rows = read_jsonl(top_atoms)
+    atom_ids, openmx_indices, d_lists, d_label_lists = ex.d_indices_for_surface(
+        top_rows, basis, offsets
+    )
+    h_d, d_basis = ex.extract_blocks(scfout.hamiltonian, d_lists)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    max_d = d_basis.shape[1]
+    d_labels = np.full((len(d_label_lists), max_d), "", dtype="<U32")
+    for index, labels in enumerate(d_label_lists):
+        d_labels[index, :len(labels)] = labels
+    np.savez_compressed(
+        output,
+        H_d=h_d,
+        d_basis_indices=d_basis,
+        d_labels=d_labels,
+        surface_atom_ids=np.array(atom_ids, dtype="<U64"),
+        openmx_atom_indices=np.array(openmx_indices, dtype=np.int64),
+        spin_switch=np.array([scfout.spin_switch], dtype=np.int64),
+        source_scfout=np.array([str(scfout_path)], dtype="<U1024"),
+        source_dat=np.array([str(dat_path)], dtype="<U1024"),
+    )
+    basis_output = (
+        Path(args.basis_output)
+        if args.basis_output
+        else output.with_suffix(output.suffix + ".basis.jsonl")
+    )
+    ex.write_basis_jsonl(basis_output, basis)
+
+    with connect_db(args.root) as con:
+        con.execute(
+            """INSERT INTO hamiltonian_exports(
+                surface_id, scfout_path, output_npz, n_surface_atoms,
+                spin_channels, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (args.surface_id, str(scfout_path), str(output), len(atom_ids),
+             h_d.shape[0], utc_now()),
+        )
+        con.commit()
+    print(f"[done] Wrote {output}")
+    print(f"[done] Wrote {basis_output}")
+    print(f"[info] surface_atoms={len(atom_ids)} spin_channels={h_d.shape[0]}")
+
+
+def add_common_surface_args(p):
     p.add_argument("--root", default="dataset", help="Dataset root directory.")
     p.add_argument("--surface-id", required=True, help="Composition-based surface ID.")
-    p.add_argument("--sample-id", required=True, help="Concrete sample ID.")
 
 
 def build_parser():
@@ -739,20 +889,14 @@ def build_parser():
     sp.add_argument("--root", default="dataset")
     sp.set_defaults(func=lambda args: init_db(args.root))
 
-    sp = sub.add_parser("create-sample", help="Create a composition/sample directory.")
+    sp = sub.add_parser("create-sample", help="Create one composition directory.")
     sp.add_argument("--root", default="dataset")
-    sp.add_argument(
-        "--composition", nargs="+", required=True,
-        help="Composition entries, e.g. Fe=20 Co=20 Ni=20 Cr=20 Mn=20.",
-    )
-    sp.add_argument("--surface-id", default=None, help="Override generated surface ID.")
-    sp.add_argument("--sample-id", default="sample_0001")
-    sp.add_argument("--initial-cif", default=None)
-    sp.add_argument("--relaxed-cif", default=None)
+    sp.add_argument("--initial-cif", default=None, help="Initial slab CIF.")
+    sp.add_argument("--relaxed-cif", default=None, help="Relaxed slab CIF.")
     sp.set_defaults(func=create_sample)
 
     sp = sub.add_parser("index-surface", help="Build top atom metadata/grid.")
-    add_common_sample_args(sp)
+    add_common_surface_args(sp)
     sp.add_argument("--initial-cif", default=None)
     sp.add_argument("--relaxed-cif", default=None)
     sp.add_argument("--side", choices=["top", "bottom"], default="top")
@@ -764,7 +908,7 @@ def build_parser():
     sp.set_defaults(func=index_surface)
 
     sp = sub.add_parser("detect-sites", help="Build FCC site metadata/grid.")
-    add_common_sample_args(sp)
+    add_common_surface_args(sp)
     sp.add_argument("--cif", default=None, help="Relaxed clean slab CIF.")
     sp.add_argument("--side", choices=["top", "bottom"], default="top")
     sp.add_argument("--layer-tol", type=float, default=0.60)
@@ -777,20 +921,49 @@ def build_parser():
 
     sp = sub.add_parser(
         "create-adsorbate-records",
-        help="Create per-site adsorbate folders and empty energy JSON files.",
+        help="Create per-site records and initial adsorbate CIF structures.",
     )
-    add_common_sample_args(sp)
-    sp.add_argument("--adsorbate", required=True, help="Adsorbate name, e.g. N.")
+    add_common_surface_args(sp)
+    sp.add_argument(
+        "--adsorbate", required=True, choices=["N", "NH", "NH2", "NH3"],
+        help="Adsorbate placed with N bound to the surface.",
+    )
+    sp.add_argument("--side", choices=["top", "bottom"], default="top")
+    sp.add_argument("--height", type=float, default=1.25)
+    sp.add_argument("--nh", type=float, default=1.02, help="N-H bond length.")
     sp.set_defaults(func=create_adsorbate_records)
 
     sp = sub.add_parser("record-energy", help="Record a manual adsorption energy.")
-    add_common_sample_args(sp)
+    add_common_surface_args(sp)
     sp.add_argument("--adsorbate", required=True)
-    sp.add_argument("--site-id", required=True)
+    sp.add_argument(
+        "--site-id", type=int, required=True,
+        help="Positive site number, e.g. 1 for site_0001.",
+    )
+    sp.add_argument("--relaxed-cif", required=True, help="Relaxed adsorbate CIF.")
     sp.add_argument("--energy", type=float, required=True)
+    sp.add_argument(
+        "--max-adsorbate-displacement", type=float, default=2.0,
+        help="Maximum allowed adsorbate-atom displacement in Angstrom.",
+    )
     sp.add_argument("--status", default="manually_entered")
     sp.add_argument("--notes", default="")
     sp.set_defaults(func=record_energy)
+
+    sp = sub.add_parser(
+        "extract-hamiltonian",
+        help="Extract top-layer d-orbital Hamiltonian data from OpenMX output.",
+    )
+    add_common_surface_args(sp)
+    sp.add_argument(
+        "--scfout", required=True, help="OpenMX .scfout file.",
+    )
+    sp.add_argument(
+        "--dat", required=True, help="OpenMX .dat input used for the run.",
+    )
+    sp.add_argument("-o", "--output", default=None)
+    sp.add_argument("--basis-output", default=None)
+    sp.set_defaults(func=extract_hamiltonian)
 
     return p
 

@@ -33,6 +33,7 @@ Examples:
 """
 
 import argparse
+from collections import Counter
 import sys
 
 import numpy as np
@@ -107,7 +108,7 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "-o", "--output", default=None,
-        help="Output CIF filename. Auto-named from the elements by default.",
+        help="Output CIF filename. Defaults to the actual chemical formula.",
     )
     return p.parse_args(argv)
 
@@ -216,6 +217,22 @@ def run_sqs(slab, elements, counts, cutoffs, n_steps, seed):
     return sqs
 
 
+def sort_atoms_by_element(atoms):
+    """Group atoms alphabetically by element, preserving order within groups."""
+    symbols = atoms.get_chemical_symbols()
+    order = sorted(range(len(atoms)), key=lambda index: symbols[index])
+    return atoms[order]
+
+
+def chemical_formula(atoms):
+    """Return an alphabetically ordered formula using the actual atom counts."""
+    counts = Counter(atoms.get_chemical_symbols())
+    return "".join(
+        f"{element}{count if count != 1 else ''}"
+        for element, count in sorted(counts.items())
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     rng = np.random.default_rng(args.seed)
@@ -258,8 +275,11 @@ def main(argv=None):
         method = "sqs"
         print("[info] SQS optimization finished.")
 
-    # 5) Save as CIF.
-    out = args.output or f"HEA_{''.join(elements)}_111_{method}.cif"
+    # 5) Group atoms by element before writing. This produces a deterministic
+    # species order for VASPKIT/VASP conversion while retaining the original
+    # site order within each element group.
+    final = sort_atoms_by_element(final)
+    out = args.output or f"{chemical_formula(final)}.cif"
     write(out, final)
     print(f"[done] Structure saved to: {out}  (method: {method})")
     return 0

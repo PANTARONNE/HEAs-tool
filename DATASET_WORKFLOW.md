@@ -1,42 +1,50 @@
 # HEA Dataset Workflow
 
-This repository stores one composition as one `surface_id`:
+The dataset uses one directory per composition. The directory name is derived
+from the CIF atom counts with element symbols sorted alphabetically. For
+example, a structure containing Co13Cr13Fe13Mn12Ni13 is stored as:
 
 ```text
-Fe_20-Co_20-Ni_20-Cr_20-Mn_20
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/
 ```
 
-Different random/SQS structures under the same composition are separated by
-`sample_id`, for example `sample_0001`.
+Only one structure is allowed for each composition. `create-sample` rejects a
+composition already present in SQLite or on disk.
 
-## 1. Initialize Dataset
+## 1. Initialize the Dataset
 
 ```bash
 python hea_dataset.py init --root dataset
 ```
 
-## 2. Create A Sample
+This creates the dataset-level files:
+
+```text
+dataset/index.sqlite
+dataset/dataset_manifest.json
+```
+
+Calling `create-sample` also initializes these files when necessary.
+
+## 2. Register the Clean Slab
 
 ```bash
 python hea_dataset.py create-sample \
   --root dataset \
-  --composition Fe=20 Co=20 Ni=20 Cr=20 Mn=20 \
-  --sample-id sample_0001 \
-  --initial-cif HEA_FeCoNiCrMn_111_sqs.cif \
-  --relaxed-cif HEA_FeCoNiCrMn_111_relaxed.cif
+  --initial-cif test_sqs.cif \
+  --relaxed-cif test_sqs-opt.cif
 ```
 
-This creates:
+Both CIF files must have identical element counts. For the example composition,
+the resulting paths are:
 
 ```text
-dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/
-  manifest.json
-  structures/
-    00_initial_sqs.cif
-    01_relaxed_slab.cif
-  metadata/
-  openmx_slab/
-  adsorbates/
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/manifest.json
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/00_initial_sqs.cif
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/01_relaxed_slab.cif
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/
 ```
 
 ## 3. Index Surface Atoms
@@ -44,94 +52,117 @@ dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/
 ```bash
 python hea_dataset.py index-surface \
   --root dataset \
-  --surface-id Fe_20-Co_20-Ni_20-Cr_20-Mn_20 \
-  --sample-id sample_0001
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13
 ```
 
-Outputs:
+By default this reads the two registered CIF files and writes:
 
 ```text
-metadata/top_atoms.jsonl
-metadata/atom_grid.npy
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/top_atoms.jsonl
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/atom_grid.npy
 ```
 
-The grid is sorted by wrapped fractional `y`, then fractional `x`.
+The initial CIF defines atom IDs and the surface grid. The relaxed coordinates
+are associated by ASE atom index, so both CIF files must preserve atom order.
 
 ## 4. Detect FCC Sites
 
 ```bash
 python hea_dataset.py detect-sites \
   --root dataset \
-  --surface-id Fe_20-Co_20-Ni_20-Cr_20-Mn_20 \
-  --sample-id sample_0001
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13
 ```
 
-Outputs:
+The default input is the registered relaxed slab
+`structures/01_relaxed_slab.cif`. Outputs:
 
 ```text
-metadata/fcc_sites.jsonl
-metadata/site_grid.npy
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/fcc_sites.jsonl
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/site_grid.npy
 ```
 
-## 5. Create Adsorbate Records
+## 5. Create Adsorbate Structures and Records
 
 ```bash
 python hea_dataset.py create-adsorbate-records \
   --root dataset \
-  --surface-id Fe_20-Co_20-Ni_20-Cr_20-Mn_20 \
-  --sample-id sample_0001 \
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
   --adsorbate N
 ```
 
-Each site folder contains only:
+Supported adsorbates are `N`, `NH`, `NH2`, and `NH3`.
+For every recorded FCC site, the command reads the registered relaxed slab and creates:
 
 ```text
-adsorbates/N/site_0001/
-  00_initial_adsorbate.cif
-  01_relaxed_adsorbate.cif
-  adsorption_energy.json
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0001/00_initial_adsorbate.cif
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0001/adsorption_energy.json
+...
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0016/00_initial_adsorbate.cif
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0016/adsorption_energy.json
 ```
 
-The two CIF files are placeholders for the structures generated/relaxed by your
-external workflow. The JSON file is used for manual adsorption energy input.
+After external relaxation, place each result at:
+
+```text
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0001/01_relaxed_adsorbate.cif
+```
 
 ## 6. Record Adsorption Energy
 
 ```bash
 python hea_dataset.py record-energy \
   --root dataset \
-  --surface-id Fe_20-Co_20-Ni_20-Cr_20-Mn_20 \
-  --sample-id sample_0001 \
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
   --adsorbate N \
-  --site-id site_0001 \
+  --site-id 1 \
+  --relaxed-cif N-site-0001-relaxed.cif \
   --energy -1.23
 ```
 
-## 7. Extract Surface d-Orbital Hamiltonian
-
-After `cif_to_openmx.py` generates the clean slab OpenMX input and OpenMX writes
-`result.scfout`, run:
-
-```bash
-python extract_openmx_hamiltonian.py \
-  --scfout dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/openmx_slab/result.scfout \
-  --dat dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/openmx_slab/input.dat \
-  --top-atoms dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/metadata/top_atoms.jsonl \
-  --output dataset/surfaces/Fe_20-Co_20-Ni_20-Cr_20-Mn_20/sample_0001/openmx_slab/hamiltonian_d_surface.npz \
-  --dataset-root dataset \
-  --surface-id Fe_20-Co_20-Ni_20-Cr_20-Mn_20 \
-  --sample-id sample_0001
-```
-
-The `.npz` contains:
+Before recording, the command checks atom count and atom order, removes the
+rigid translation measured from substrate atoms, and calculates minimum-image
+adsorbate displacements. The default maximum allowed displacement is 2.0 Å;
+override it with `--max-adsorbate-displacement`. A failed check does not copy
+the CIF or update the energy. A successful check copies the structure to:
 
 ```text
-H_d
-d_basis_indices
-d_labels
-surface_atom_ids
-openmx_atom_indices
-spin_switch
-source_scfout
-source_dat
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/N/site_0001/01_relaxed_adsorbate.cif
+```
+
+It also writes the energy and displacement metrics to `adsorption_energy.json`
+and updates the SQLite index.
+
+## 7. Generate the Clean-Slab OpenMX Input
+
+```bash
+python cif_to_openmx.py \
+  dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/01_relaxed_slab.cif \
+  --data-path DFT_DATA19 \
+  -o dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/input.dat
+```
+
+Run OpenMX externally and place its output at, for example:
+
+```text
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/input.scfout
+```
+
+## 8. Extract the Surface d-Orbital Hamiltonian
+
+```bash
+python hea_dataset.py extract-hamiltonian \
+  --root dataset \
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --dat dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/input.dat \
+  --scfout dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/input.scfout
+```
+
+The command obtains `metadata/top_atoms.jsonl` from `surface-id`
+automatically. `--dat` and `--scfout` are required inputs. Use `--output` only
+when a non-default output path is needed.
+
+The basis mapping is written by default to:
+
+```text
+dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/hamiltonian_d_surface.npz.basis.jsonl
 ```

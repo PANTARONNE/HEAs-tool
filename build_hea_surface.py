@@ -113,13 +113,14 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def normalize_ratios(elements, ratios, rng):
+def normalize_ratios(elements, ratios, rng, verbose=True):
     """Return normalized ratios (summing to 1); generate them when not given."""
     n = len(elements)
     if ratios is None:
         # Sample uniformly on (0,1) then normalize -> random, non-zero ratios.
         ratios = rng.random(n) + 0.1
-        print("[info] No ratios given; generated randomly.")
+        if verbose:
+            print("[info] No ratios given; generated randomly.")
     else:
         if len(ratios) != n:
             sys.exit(f"[error] Number of ratios ({len(ratios)}) does not match "

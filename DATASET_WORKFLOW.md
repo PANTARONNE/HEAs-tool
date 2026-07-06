@@ -26,26 +26,49 @@ dataset/dataset_manifest.json
 
 Calling `create-sample` also initializes these files when necessary.
 
-## 2. Register the Clean Slab
+## 2. Generate and Register the Clean Slab
+
+`create-sample` builds the FCC(111) SQS slab directly from elements and optional
+ratios. When `--ratios` is omitted, ratios are drawn at random; if the resulting
+composition already exists, new ratios are drawn until a novel one is found
+(bounded by `--max-attempts`). Fixed ratios that collide are a hard error.
 
 ```bash
 python hea_dataset.py create-sample \
   --root dataset \
-  --initial-cif test_sqs.cif \
-  --relaxed-cif test_sqs-opt.cif
+  --elements Fe Co Ni Cr Mn \
+  --ratios 1 1 1 1 1
 ```
 
-Both CIF files must have identical element counts. For the example composition,
-the resulting paths are:
+Only the initial SQS structure is registered here; the relaxed slab is added
+later with `record-relaxed`. The resulting paths are:
 
 ```text
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/manifest.json
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/00_initial_sqs.cif
-dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/01_relaxed_slab.cif
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/metadata/
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/adsorbates/
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/
 ```
+
+Omit `--ratios` to let a random composition be chosen. Use `--no-sqs` to skip
+SQS optimization, and `--seed` for reproducibility.
+
+## 2b. Register the Relaxed Slab
+
+After relaxing `00_initial_sqs.cif` externally, register the result. The
+command checks the composition matches and that atom count and order are
+preserved (index-surface associates relaxed coordinates by ASE atom index):
+
+```bash
+python hea_dataset.py record-relaxed \
+  --root dataset \
+  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --relaxed-cif test_sqs-opt.cif
+```
+
+This copies the structure to `structures/01_relaxed_slab.cif` and updates the
+manifest and SQLite index (status `slab_relaxed`).
 
 ## 3. Index Surface Atoms
 

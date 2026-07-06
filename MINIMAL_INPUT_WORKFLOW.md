@@ -6,30 +6,44 @@ This is the shortest current workflow for the example composition
 ## Required Manual Inputs
 
 ```text
-initial_slab_cif     test_sqs.cif
-relaxed_slab_cif     test_sqs-opt.cif
+elements              Fe Co Ni Cr Mn
+ratios (optional)     1 1 1 1 1        # random when omitted
+relaxed_slab_cif      test_sqs-opt.cif
 adsorbate             N
 openmx_data_path      DFT_DATA19
 openmx_scfout         input.scfout
 adsorption_energy_eV  one value per site
 ```
 
-The composition ID is calculated automatically from CIF atom counts. It is not
-a command-line input to `create-sample`.
+The composition ID is derived automatically from the generated atom counts. It
+is not a command-line input to `create-sample`.
 
-## 1. Register the Structure
+## 1. Generate and Register the Structure
 
 ```powershell
-python hea_dataset.py create-sample --root dataset --initial-cif test_sqs.cif --relaxed-cif test_sqs-opt.cif
+python hea_dataset.py create-sample --root dataset --elements Fe Co Ni Cr Mn --ratios 1 1 1 1 1
 ```
 
-Created paths:
+Created paths (only the initial SQS structure at this stage):
 
 ```text
 dataset/index.sqlite
 dataset/dataset_manifest.json
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/manifest.json
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/00_initial_sqs.cif
+```
+
+## 1b. Register the Relaxed Structure
+
+After external relaxation of `00_initial_sqs.cif`:
+
+```powershell
+python hea_dataset.py record-relaxed --root dataset --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 --relaxed-cif test_sqs-opt.cif
+```
+
+Created path:
+
+```text
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/structures/01_relaxed_slab.cif
 ```
 

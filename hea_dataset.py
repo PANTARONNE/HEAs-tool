@@ -28,6 +28,7 @@ import numpy as np
 
 
 SCHEMA_VERSION = 2
+DEFAULT_MAX_ATTEMPTS = 1000
 METALS_DEFAULT = [
     "Fe", "Co", "Ni", "Cu", "Mo", "Zn", "Ga", "In", "Sn", "W",
     "Cr", "Mn", "Pd", "Pt", "Rh", "Ir",
@@ -247,56 +248,143 @@ def copy_if_requested(src, dst):
     return dst
 
 
-def create_sample(args):
-    cif_paths = [path for path in (args.initial_cif, args.relaxed_cif) if path]
-    inferred = [composition_from_cif(path) for path in cif_paths]
-    if len(inferred) == 2 and not compositions_match(inferred[0], inferred[1]):
-        raise SystemExit(
-            "[error] Initial and relaxed CIF files have different compositions."
-        )
+def surface_exists(root, surface_id):
+    """Return True if the surface is registered in the DB or present on disk."""
+    paths = dataset_paths(root, surface_id)
+    if paths["surface"].exists():
+        return True
+    db_path = dataset_paths(root)["db"]
+    if db_path.is_file():
+        with sqlite3.connect(db_path) as con:
+            has_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='surfaces'"
+            ).fetchone()
+            if has_table and con.execute(
+                "SELECT 1 FROM surfaces WHERE surface_id=?", (surface_id,)
+            ).fetchone():
+                return True
+    return False
 
-    if not inferred:
-        raise SystemExit(
-            "[error] Provide --initial-cif or --relaxed-cif to infer composition."
+
+def composition_from_counts(elements, counts):
+    """Build a sorted (element, count) composition, dropping zero-count elements.
+
+    Sorting alphabetically and dropping zeros makes the surface_id match the one
+    inferred later from a CIF via composition_from_cif, so create-sample and
+    record-relaxed agree on the identity of a composition.
+    """
+    merged = Counter()
+    for element, count in zip(elements, counts):
+        merged[element] += int(count)
+    return [(element, merged[element]) for element in sorted(merged)
+            if merged[element] > 0]
+
+
+def create_sample(args):
+    """Generate an SQS slab from elements (+optional ratios) and register it.
+
+    When ratios are not given they are drawn at random; if the resulting
+    composition already exists, new ratios are drawn until a novel composition
+    is found (bounded by --max-attempts). Fixed user ratios that collide are a
+    hard error because they cannot be regenerated.
+    """
+    try:
+        import build_hea_surface as builder
+    except ImportError as exc:
+        raise SystemExit(f"[error] Could not import build_hea_surface.py: {exc}")
+
+    elements = args.elements
+    rng = np.random.default_rng(args.seed)
+    size = tuple(args.size)
+    random_ratios = args.ratios is None
+
+    # Build the template once to learn the site count; substitution/SQS reuse it.
+    a = args.lattice_constant
+    template = None
+    n_sites = None
+    composition = None
+    counts = None
+
+    for attempt in range(1, args.max_attempts + 1):
+        fractions = builder.normalize_ratios(
+            elements, args.ratios, rng, verbose=(attempt == 1 and random_ratios)
         )
-    composition = inferred[0]
+        if template is None:
+            lattice = a or builder.estimate_lattice_constant(elements, fractions)
+            template = builder.build_template_slab(
+                elements[0], size, lattice, args.vacuum
+            )
+            n_sites = len(template)
+        candidate_counts = builder.largest_remainder_counts(fractions, n_sites)
+        candidate = composition_from_counts(elements, candidate_counts)
+        surface_id = surface_id_from_composition(candidate)
+        if not surface_exists(args.root, surface_id):
+            composition = candidate
+            counts = candidate_counts
+            break
+        if not random_ratios:
+            raise SystemExit(
+                f"[error] Composition already exists in dataset: {surface_id}"
+            )
+        if attempt == args.max_attempts:
+            raise SystemExit(
+                f"[error] Could not find a novel composition after "
+                f"{args.max_attempts} attempts; the composition space for these "
+                f"elements and {n_sites} sites may be exhausted."
+            )
 
     surface_id = surface_id_from_composition(composition)
     paths = dataset_paths(args.root, surface_id)
-    db_path = dataset_paths(args.root)["db"]
-    db_exists = False
-    if db_path.is_file():
-        with sqlite3.connect(db_path) as con:
-            if con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='surfaces'"
-            ).fetchone():
-                db_exists = con.execute(
-                    "SELECT 1 FROM surfaces WHERE surface_id=?", (surface_id,)
-                ).fetchone() is not None
-    if db_exists or paths["surface"].exists():
-        raise SystemExit(
-            f"[error] Composition already exists in dataset: {surface_id}"
+
+    print("=" * 60)
+    print(f"Template      : FCC(111), size={size}, sites={n_sites}")
+    print(f"Surface ID    : {surface_id}")
+    print("Composition   :")
+    for element, count in composition:
+        print(f"  {element:>3s} : {count:>3d} atoms ({count / n_sites * 100:6.2f}%)")
+    print("=" * 60)
+
+    # Random substitution -> initial structure, then optional SQS refinement.
+    random_slab = builder.assign_random_substitution(
+        template, elements, counts, rng
+    )
+    final = None
+    if not args.no_sqs:
+        final = builder.run_sqs(
+            template, elements, counts, args.cutoffs, args.n_steps, args.seed
         )
+    if final is None:
+        final = random_slab
+        method = "random"
+    else:
+        method = "sqs"
+        print("[info] SQS optimization finished.")
+    final = builder.sort_atoms_by_element(final)
 
     init_db(args.root)
     for key in ("structures", "metadata", "openmx_slab", "adsorbates"):
         paths[key].mkdir(parents=True, exist_ok=True)
 
-    initial = copy_if_requested(
-        args.initial_cif, paths["structures"] / "00_initial_sqs.cif"
-    )
-    relaxed = copy_if_requested(
-        args.relaxed_cif, paths["structures"] / "01_relaxed_slab.cif"
-    )
+    initial_cif = paths["structures"] / "00_initial_sqs.cif"
+    from ase.io import write as ase_write
+    ase_write(str(initial_cif), final)
 
     manifest = {
         "surface_id": surface_id,
         "composition": [{"element": el, "atom_count": count}
                         for el, count in composition],
+        "generation": {
+            "method": method,
+            "size": list(size),
+            "n_sites": n_sites,
+            "vacuum": args.vacuum,
+            "random_ratios": random_ratios,
+            "seed": args.seed,
+        },
         "created_at": utc_now(),
         "files": {
-            "initial_cif": relpath_or_none(initial, paths["surface"]),
-            "relaxed_cif": relpath_or_none(relaxed, paths["surface"]),
+            "initial_cif": relpath_or_none(initial_cif, paths["surface"]),
+            "relaxed_cif": None,
             "top_atoms": "metadata/top_atoms.jsonl",
             "fcc_sites": "metadata/fcc_sites.jsonl",
             "atom_grid": "metadata/atom_grid.npy",
@@ -312,23 +400,92 @@ def create_sample(args):
                 relaxed_cif, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (surface_id, json.dumps(manifest["composition"]), str(paths["surface"]),
-             "created", relpath_or_none(initial, paths["surface"]),
-             relpath_or_none(relaxed, paths["surface"]), utc_now(), utc_now()),
+             "created", relpath_or_none(initial_cif, paths["surface"]),
+             None, utc_now(), utc_now()),
         )
-        for kind, artifact in (("initial_cif", initial), ("relaxed_cif", relaxed)):
-            if artifact is not None:
-                con.execute(
-                    """
-                    INSERT INTO artifacts(surface_id, kind, path, sha256, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        surface_id, kind, str(artifact), sha256_file(artifact), utc_now(),
-                    ),
-                )
+        con.execute(
+            """
+            INSERT INTO artifacts(surface_id, kind, path, sha256, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (surface_id, "initial_cif", str(initial_cif),
+             sha256_file(initial_cif), utc_now()),
+        )
         con.commit()
 
-    print(f"[done] Created composition {surface_id}")
+    print(f"[done] Created composition {surface_id} ({method}) -> {initial_cif}")
+
+
+def record_relaxed(args):
+    """Register an externally relaxed slab against an existing composition."""
+    paths = dataset_paths(args.root, args.surface_id)
+    initial_cif = paths["structures"] / "00_initial_sqs.cif"
+    if not surface_exists(args.root, args.surface_id) or not initial_cif.is_file():
+        raise SystemExit(
+            f"[error] Surface not registered; run create-sample first: "
+            f"{args.surface_id}"
+        )
+
+    relaxed_source = Path(args.relaxed_cif)
+    if not relaxed_source.is_file():
+        raise SystemExit(f"[error] Relaxed CIF not found: {relaxed_source}")
+
+    initial_composition = composition_from_cif(initial_cif)
+    relaxed_composition = composition_from_cif(relaxed_source)
+    if not compositions_match(initial_composition, relaxed_composition):
+        raise SystemExit(
+            "[error] Relaxed slab composition differs from the registered "
+            f"initial structure: {surface_id_from_composition(relaxed_composition)}"
+        )
+
+    # index-surface associates relaxed coordinates by ASE atom index, so the
+    # relaxed CIF must preserve both atom count and per-atom element order.
+    initial_atoms = read_cif(initial_cif)
+    relaxed_atoms = read_cif(relaxed_source)
+    if len(initial_atoms) != len(relaxed_atoms):
+        raise SystemExit(
+            f"[error] Atom count changed during relaxation: "
+            f"{len(initial_atoms)} -> {len(relaxed_atoms)}."
+        )
+    if initial_atoms.get_chemical_symbols() != relaxed_atoms.get_chemical_symbols():
+        raise SystemExit(
+            "[error] Relaxed slab CIF does not preserve the initial atom order."
+        )
+
+    relaxed_target = paths["structures"] / "01_relaxed_slab.cif"
+    if relaxed_source.resolve() != relaxed_target.resolve():
+        shutil.copy2(relaxed_source, relaxed_target)
+
+    if paths["surface_manifest"].is_file():
+        with open(paths["surface_manifest"], "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        manifest.setdefault("files", {})["relaxed_cif"] = relpath_or_none(
+            relaxed_target, paths["surface"]
+        )
+        write_json(paths["surface_manifest"], manifest)
+
+    with connect_db(args.root) as con:
+        con.execute(
+            "UPDATE surfaces SET relaxed_cif=?, status=?, updated_at=? "
+            "WHERE surface_id=?",
+            (relpath_or_none(relaxed_target, paths["surface"]), "slab_relaxed",
+             utc_now(), args.surface_id),
+        )
+        con.execute(
+            "DELETE FROM artifacts WHERE surface_id=? AND kind='relaxed_cif'",
+            (args.surface_id,),
+        )
+        con.execute(
+            """
+            INSERT INTO artifacts(surface_id, kind, path, sha256, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (args.surface_id, "relaxed_cif", str(relaxed_target),
+             sha256_file(relaxed_target), utc_now()),
+        )
+        con.commit()
+
+    print(f"[done] Recorded relaxed slab for {args.surface_id} -> {relaxed_target}")
 
 
 def relpath_or_none(path, base):
@@ -889,11 +1046,58 @@ def build_parser():
     sp.add_argument("--root", default="dataset")
     sp.set_defaults(func=lambda args: init_db(args.root))
 
-    sp = sub.add_parser("create-sample", help="Create one composition directory.")
+    sp = sub.add_parser(
+        "create-sample",
+        help="Generate an SQS slab from elements (+optional ratios) and register it.",
+    )
     sp.add_argument("--root", default="dataset")
-    sp.add_argument("--initial-cif", default=None, help="Initial slab CIF.")
-    sp.add_argument("--relaxed-cif", default=None, help="Relaxed slab CIF.")
+    sp.add_argument(
+        "-e", "--elements", nargs="+", required=True, metavar="EL",
+        help="Element types to include, e.g. Fe Co Ni Cr Mn.",
+    )
+    sp.add_argument(
+        "-r", "--ratios", nargs="+", type=float, default=None, metavar="R",
+        help="Ratio per element. Randomly generated (and retried on collision) "
+             "when omitted.",
+    )
+    sp.add_argument(
+        "-s", "--size", nargs=3, type=int, default=(4, 4, 4),
+        metavar=("NX", "NY", "NZ"), help="Repeats/layers along x, y and z.",
+    )
+    sp.add_argument(
+        "--vacuum", type=float, default=15.0,
+        help="Total vacuum-layer thickness (Angstrom).",
+    )
+    sp.add_argument(
+        "-a", "--lattice-constant", type=float, default=None,
+        help="Template lattice constant; defaults to a Vegard's-law estimate.",
+    )
+    sp.add_argument(
+        "--cutoffs", nargs="+", type=float, default=[6.0, 4.5],
+        help="icet cluster-space cutoff radii (Angstrom): pair, triplet, ...",
+    )
+    sp.add_argument(
+        "--n-steps", type=int, default=10000,
+        help="Monte Carlo steps for SQS optimization.",
+    )
+    sp.add_argument("--seed", type=int, default=None, help="Random seed.")
+    sp.add_argument(
+        "--no-sqs", action="store_true",
+        help="Skip SQS and register the randomly substituted structure.",
+    )
+    sp.add_argument(
+        "--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS,
+        help="Max random-ratio draws before giving up on a novel composition.",
+    )
     sp.set_defaults(func=create_sample)
+
+    sp = sub.add_parser(
+        "record-relaxed",
+        help="Register an externally relaxed slab for an existing composition.",
+    )
+    add_common_surface_args(sp)
+    sp.add_argument("--relaxed-cif", required=True, help="Relaxed slab CIF.")
+    sp.set_defaults(func=record_relaxed)
 
     sp = sub.add_parser("index-surface", help="Build top atom metadata/grid.")
     add_common_surface_args(sp)

@@ -37,7 +37,7 @@ root="dataset"
 workspace="workspace"
 openmx_data="DFT_DATA19"
 poll=60
-max_gen=5
+max_gen=2
 skip_hamilton=0
 surface_id=""
 elements=()
@@ -135,7 +135,7 @@ chmod +x "${relax_dir}/check-convergence.sh"
     bash "${script_dir}/vasp-inputs.sh" "${surface_id}.cif"
     echo 1 > .gen_count
     rm -f CONVERGED NOT_CONVERGED_MAX_GEN CRASHED SCF_ILL CHECK_ERROR
-    MAX_GEN="$max_gen" sbatch vasp-gam.slurm
+    sbatch --export=ALL,MAX_GEN="$max_gen" vasp-gam.slurm
 )
 
 marker=$(wait_for_marker "$relax_dir" \
@@ -156,9 +156,32 @@ from ase.io import read, write
 write(sys.argv[2], read(sys.argv[1], format="vasp"))
 PY
 
+log "step 2: extracting total energy from OUTCAR"
+vasp_energy=""
+if [[ -f "${relax_dir}/OUTCAR" ]]; then
+    vasp_energy=$(
+        "$PYTHON" - "${relax_dir}/OUTCAR" <<'PY'
+import sys, re
+energy = None
+with open(sys.argv[1]) as fh:
+    for line in fh:
+        m = re.search(r'energy\s+without\s+entropy\s*=\s*([+-]?\d+(?:\.\d+)?)', line)
+        if m:
+            energy = m.group(1)
+print(energy if energy is not None else "")
+PY
+    )
+fi
+if [[ -n "$vasp_energy" ]]; then
+    log "step 2: total energy = ${vasp_energy} eV"
+else
+    log "step 2: WARNING: could not extract TOTEN from OUTCAR; energy will not be recorded."
+fi
+
 log "step 2: record-relaxed"
-"$PYTHON" "${repo_dir}/hea_dataset.py" record-relaxed \
-    --root "$root" --surface-id "$surface_id" --relaxed-cif "$relaxed_cif" >&2
+record_args=(record-relaxed --root "$root" --surface-id "$surface_id" --relaxed-cif "$relaxed_cif")
+[[ -n "$vasp_energy" ]] && record_args+=(--energy "$vasp_energy")
+"$PYTHON" "${repo_dir}/hea_dataset.py" "${record_args[@]}" >&2
 
 # ============================================================================
 # Step 3: index the surface atoms

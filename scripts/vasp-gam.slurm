@@ -20,6 +20,13 @@ workdir=${SLURM_SUBMIT_DIR:-$PWD}
 cd "$workdir" || exit 1
 check_script="${workdir}/check-convergence.sh"
 
+for marker in CONVERGED NOT_CONVERGED_MAX_GEN CRASHED SCF_ILL CHECK_ERROR; do
+    if [[ -e "$marker" ]]; then
+        echo "[chain] terminal marker ${marker} already exists; exiting without running VASP." >&2
+        exit 0
+    fi
+done
+
 module purge
 source /work/home/acsppswc7s/apprepo/vasp/642-dtk23.10_all/scripts/env.sh
 
@@ -76,11 +83,22 @@ case "$status" in
             echo "[chain] gen ${gen}: CONTCAR missing/empty, cannot continue." >&2
             touch CRASHED
         else
+            resubmit_marker=".resubmitted_gen_${gen}"
+            if [[ -e "$resubmit_marker" ]]; then
+                echo "[chain] gen ${gen}: resubmission was already requested; not submitting again." >&2
+                exit 0
+            fi
             next=$((gen + 1))
             echo "[chain] gen ${gen}: not converged; resubmitting as gen ${next}." >&2
             cp -p CONTCAR POSCAR
             echo "$next" > .gen_count
-            sbatch "$0"
+            touch "$resubmit_marker"
+            if ! sbatch --export=ALL,MAX_GEN="$MAX_GEN" "$0"; then
+                rm -f "$resubmit_marker"
+                echo "[chain] gen ${gen}: sbatch failed." >&2
+                touch CHECK_ERROR
+                exit 1
+            fi
         fi
         ;;
     20)

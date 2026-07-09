@@ -58,8 +58,9 @@ if ! grep -q 'General timing and accounting' "$outcar"; then
     exit 20
 fi
 
-# 2) Ionic convergence: VASP's own verdict against EDIFFG.
-if grep -q 'reached required accuracy - stopping structural energy minimization' "$outcar"; then
+# 2) Ionic convergence: VASP's own verdict against EDIFFG. Different VASP
+#    builds spell the trailing text differently, so match the stable prefix.
+if grep -qi 'reached required accuracy' "$outcar"; then
     printf '[check] reached required accuracy -> converged\n' >&2
     exit 0
 fi

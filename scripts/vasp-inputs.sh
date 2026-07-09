@@ -78,7 +78,7 @@ element_order=$(
 }
 
 # 105: explicitly pass the CIF element order instead of relying on its default.
-printf '105\n%s\n%s\n' "$cif_file" "$element_order" | vaspkit
+printf '105\n%s\n%s\n' "$cif_file" "$element_order" | vaspkit > /dev/null 2>&1
 [[ -s POSCAR ]] || {
     printf 'Error: VASPKIT task 105 did not generate POSCAR.\n' >&2
     exit 1
@@ -94,12 +94,12 @@ poscar_order=$(awk 'NR == 6 { for (i = 1; i <= NF; i++) printf "%s%s", (i == 1 ?
 cp -- "$incar_template" INCAR
 
 # 103: default POTCAR. 102: M-P scheme, Gamma-only.
-printf '103\n' | vaspkit
-printf '102\n1\n0\n' | vaspkit
+printf '103\n' | vaspkit > /dev/null 2>&1
+printf '102\n1\n0\n' | vaspkit > /dev/null 2>&1
 
 # 402: POSCAR -> fix atoms by z range -> fractional z in [0, 0.46].
 # The resulting F F F flags constrain motion in all three Cartesian directions.
-printf '402\n1\n3\n0 0.46\n1\nall\n' | vaspkit
+printf '402\n1\n3\n0 0.46\n1\nall\n' | vaspkit > /dev/null 2>&1
 [[ -s POSCAR_FIX.vasp ]] || {
     printf 'Error: VASPKIT task 402 did not generate POSCAR_FIX.vasp\n' >&2
     exit 1

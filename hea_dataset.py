@@ -34,6 +34,134 @@ METALS_DEFAULT = [
     "Cr", "Mn", "Pd", "Pt", "Rh", "Ir",
 ]
 
+# ---------------------------------------------------------------------------
+# HEA thermodynamic screening  (Zhang et al. criteria)
+# ---------------------------------------------------------------------------
+
+# Universal gas constant [J mol⁻¹ K⁻¹]
+_R = 8.314
+
+# Screening thresholds:
+_HEA_ENTROPY_MIN    =  1.5 * _R  # ΔS_mix > 1.5 R  [J mol⁻¹ K⁻¹]
+_HEA_SIZE_DELTA_MAX =  6.6       # δ ≤ 6.6 %
+_HEA_HMIX_MIN       = -15.0      # ΔH_mix lower bound  [kJ mol⁻¹]
+_HEA_HMIX_MAX       =   5.0      # ΔH_mix upper bound  [kJ mol⁻¹]
+
+# Metallic atomic radii [pm].
+# Source: Kittel, "Introduction to Solid State Physics", 8th ed., Table 1.
+_ATOMIC_RADII_PM = {
+    "Fe": 126.0,
+    "Co": 125.0,
+    "Ni": 124.0,
+    "Cu": 128.0,
+    "Zn": 134.0,
+    "Ga": 135.0,
+    "In": 167.0,
+    "Mo": 139.0,
+    "W":  139.0,
+    "Sn": 151.0,
+}
+
+# Binary mixing enthalpies ΔH^{A-B}_mix [kJ mol⁻¹].
+# Values are estimated from Miedema's model or taken from the literature.
+# Replace each None with the correct numerical value before use; pairs whose
+# value is None cause the mixing-enthalpy check to be skipped (with a warning).
+#
+# Keys are alphabetically-sorted (A, B) tuples so both orderings resolve to the
+# same entry automatically.
+_BINARY_HMIX = {
+    # Co — Fe
+    ("Co", "Fe"):   -0.06904243624999928,   # ΔH_mix(Co–Fe)  [kJ/mol]
+    # Co — Ni
+    ("Co", "Ni"):   -0.02639796000000061,   # ΔH_mix(Co–Ni)  [kJ/mol]
+    # Co — Cu
+    ("Co", "Cu"):   0.05296564250000024,    # ΔH_mix(Co–Cu)  [kJ/mol]
+    # Co — Zn
+    ("Co", "Zn"):   -0.06440434124999994,   # ΔH_mix(Co–Zn)  [kJ/mol]
+    # Co — Ga
+    ("Co", "Ga"):   -0.2825187887500009,    # ΔH_mix(Co–Ga)  [kJ/mol]
+    # Co — In
+    ("Co", "In"):   -0.03301798562499947,   # ΔH_mix(Co–In)  [kJ/mol]
+    # Co — Mo
+    ("Co", "Mo"):   -0.044348996250000994,  # ΔH_mix(Co–Mo)  [kJ/mol]
+    # Co — W
+    ("Co", "W"):    -0.08396261250000059,   # ΔH_mix(Co–W)   [kJ/mol]
+    # Co — Sn
+    ("Co", "Sn"):   -0.14228259083333347,   # ΔH_mix(Co–Sn)  [kJ/mol]
+    # Fe — Ni
+    ("Fe", "Ni"):   -0.09145708749999937,   # ΔH_mix(Fe–Ni)  [kJ/mol]
+    # Fe — Cu
+    ("Cu", "Fe"):   0.06767582333333325,    # ΔH_mix(Cu–Fe)  [kJ/mol]
+    # Fe — Zn
+    ("Fe", "Zn"):   -0.03887403857142857,   # ΔH_mix(Fe–Zn)  [kJ/mol]
+    # Fe — Ga
+    ("Fe", "Ga"):   -0.23574756187500068,   # ΔH_mix(Fe–Ga)  [kJ/mol]
+    # Fe — In
+    ("Fe", "In"):   0.08910415999999977,   # ΔH_mix(Fe–In)  [kJ/mol]
+    # Fe — Mo
+    ("Fe", "Mo"):   -0.0030923849999998274,   # ΔH_mix(Fe–Mo)  [kJ/mol]
+    # Fe — W
+    ("Fe", "W"):    -0.023666749166667483,   # ΔH_mix(Fe–W)   [kJ/mol]
+    # Fe — Sn
+    ("Fe", "Sn"):   -0.0393573491666667,   # ΔH_mix(Fe–Sn)  [kJ/mol]
+    # Ni — Cu
+    ("Cu", "Ni"):   -0.0018628412500003577,   # ΔH_mix(Cu–Ni)  [kJ/mol]
+    # Ni — Zn
+    ("Ni", "Zn"):   -0.2547110099999994,   # ΔH_mix(Ni–Zn)  [kJ/mol]
+    # Ni — Ga
+    ("Ga", "Ni"):   -0.4091984924999991,   # ΔH_mix(Ga–Ni)  [kJ/mol]
+    # Ni — In
+    ("In", "Ni"):   -0.1919506283333329,   # ΔH_mix(In–Ni)  [kJ/mol]
+    # Ni — Mo
+    ("Mo", "Ni"):   -0.0923721724999993,   # ΔH_mix(Mo–Ni)  [kJ/mol]
+    # Ni — W
+    ("Ni", "W"):    -0.10733122500000025,   # ΔH_mix(Ni–W)   [kJ/mol]
+    # Ni — Sn
+    ("Ni", "Sn"):   -0.2849230889999994,   # ΔH_mix(Ni–Sn)  [kJ/mol]
+    # Cu — Zn
+    ("Cu", "Zn"):   -0.11121758769230758,   # ΔH_mix(Cu–Zn)  [kJ/mol]
+    # Cu — Ga
+    ("Cu", "Ga"):   -0.11059130346153814,   # ΔH_mix(Cu–Ga)  [kJ/mol]
+    # Cu — In
+    ("Cu", "In"):   -0.015922263333333575,   # ΔH_mix(Cu–In)  [kJ/mol]
+    # Cu — Mo
+    ("Cu", "Mo"):   0.07922715333333367,   # ΔH_mix(Cu–Mo)  [kJ/mol]
+    # Cu — W
+    ("Cu", "W"):    0.1272672366666671,   # ΔH_mix(Cu–W)   [kJ/mol]
+    # Cu — Sn
+    ("Cu", "Sn"):   -0.05965081250000015,   # ΔH_mix(Cu–Sn)  [kJ/mol]
+    # Zn — Ga
+    ("Ga", "Zn"):   0.014705678750000098,   # ΔH_mix(Ga–Zn)  [kJ/mol]
+    # Zn — In
+    ("In", "Zn"):   0.01643934833333353,   # ΔH_mix(In–Zn)  [kJ/mol]
+    # Zn — Mo
+    ("Mo", "Zn"):   -0.04813484562499992,   # ΔH_mix(Mo–Zn)  [kJ/mol]
+    # Zn — W
+    ("W",  "Zn"):   0.05189458250000012,   # ΔH_mix(W–Zn)   [kJ/mol]
+    # Zn — Sn
+    ("Sn", "Zn"):   0.02516417500000001,   # ΔH_mix(Sn–Zn)  [kJ/mol]
+    # Ga — In
+    ("Ga", "In"):   0.02130772708333299,   # ΔH_mix(Ga–In)  [kJ/mol]
+    # Ga — Mo
+    ("Ga", "Mo"):   -0.17489470199999957,   # ΔH_mix(Ga–Mo)  [kJ/mol]
+    # Ga — W
+    ("Ga", "W"):    -0.08640789800000022,   # ΔH_mix(Ga–W)   [kJ/mol]
+    # Ga — Sn
+    ("Ga", "Sn"):   0.035810431666666726,   # ΔH_mix(Ga–Sn)  [kJ/mol]
+    # In — Mo
+    ("In", "Mo"):   0.022434562000000113,   # ΔH_mix(In–Mo)  [kJ/mol]
+    # In — W
+    ("In", "W"):    0.1469121500000007,   # ΔH_mix(In–W)   [kJ/mol]
+    # In — Sn
+    ("In", "Sn"):   0.001599915625000392,   # ΔH_mix(In–Sn)  [kJ/mol]
+    # Mo — W
+    ("Mo", "W"):    -0.017974743333333265,   # ΔH_mix(Mo–W)   [kJ/mol]
+    # Mo — Sn
+    ("Mo", "Sn"):   -0.03018114499999945,   # ΔH_mix(Mo–Sn)  [kJ/mol]
+    # W  — Sn
+    ("Sn", "W"):    0.16359640333333422,   # ΔH_mix(Sn–W)   [kJ/mol]
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -143,6 +271,7 @@ def init_db(root):
                 status TEXT NOT NULL DEFAULT 'created',
                 initial_cif TEXT,
                 relaxed_cif TEXT,
+                total_energy_eV REAL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -222,6 +351,12 @@ def init_db(root):
             );
             """
         )
+        # Additive migration: add total_energy_eV to existing datasets without
+        # bumping SCHEMA_VERSION (nullable column, fully backwards-compatible).
+        try:
+            con.execute("ALTER TABLE surfaces ADD COLUMN total_energy_eV REAL")
+        except sqlite3.OperationalError:
+            pass  # column already present
         con.execute(
             "INSERT OR REPLACE INTO dataset_info(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -280,6 +415,85 @@ def composition_from_counts(elements, counts):
             if merged[element] > 0]
 
 
+def _check_hea_criteria(elements, fractions):
+    """Screen a composition against three HEA formation criteria.
+
+    Args:
+        elements: list of element symbols
+        fractions: normalized atomic fractions (mole fractions)
+
+    Returns:
+        (passed: bool, report: dict)
+            passed is True when all computable checks pass.
+            report contains per-criterion values and pass/fail status.
+    """
+    xs = np.array(fractions, dtype=float)
+    xs = xs / xs.sum()  # renormalize for safety
+
+    # -----------------------------------------------------------------------
+    # 1. Configurational entropy:  ΔS_mix = -R Σ x_i ln(x_i)
+    #    Criterion: ΔS_mix > 1.5 R
+    # -----------------------------------------------------------------------
+    nonzero = xs > 1e-12
+    s_mix = -_R * np.sum(xs[nonzero] * np.log(xs[nonzero]))
+    entropy_ok = s_mix > _HEA_ENTROPY_MIN
+
+    # -----------------------------------------------------------------------
+    # 2. Atomic size mismatch:  δ = 100 × sqrt(Σ x_i (1 - r_i / r̄)²)
+    #    Criterion: δ ≤ 6.6 %
+    # -----------------------------------------------------------------------
+    radii = np.array([_ATOMIC_RADII_PM.get(el) for el in elements])
+    missing_radii = [el for el, r in zip(elements, radii) if r is None]
+    if missing_radii:
+        delta = None
+        size_ok = None
+    else:
+        radii = radii.astype(float)
+        r_bar = np.sum(xs * radii)
+        delta = 100.0 * np.sqrt(np.sum(xs * ((1.0 - radii / r_bar) ** 2)))
+        size_ok = delta <= _HEA_SIZE_DELTA_MAX
+
+    # -----------------------------------------------------------------------
+    # 3. Mixing enthalpy:  ΔH_mix ≈ Σ_{i<j} 4·ΔH^{ij}_binary · x_i · x_j
+    #    Criterion: -15 kJ/mol ≤ ΔH_mix ≤ +5 kJ/mol
+    # -----------------------------------------------------------------------
+    h_mix = 0.0
+    missing_pairs = []
+    can_compute_h = True
+    for i, (el_i, x_i) in enumerate(zip(elements, xs)):
+        for j in range(i + 1, len(elements)):
+            el_j = elements[j]
+            x_j = xs[j]
+            key = tuple(sorted([el_i, el_j]))
+            val = _BINARY_HMIX.get(key)
+            if val is None:
+                missing_pairs.append(f"{el_i}-{el_j}")
+                can_compute_h = False
+            else:
+                h_mix += 4.0 * val * x_i * x_j
+
+    if not can_compute_h:
+        h_mix = None
+        hmix_ok = None
+    else:
+        hmix_ok = _HEA_HMIX_MIN <= h_mix <= _HEA_HMIX_MAX
+
+    # All computable checks must pass
+    passed = all(c is True for c in [entropy_ok, size_ok, hmix_ok] if c is not None)
+
+    report = {
+        "s_mix_over_R": float(s_mix / _R),
+        "entropy_ok": entropy_ok,
+        "delta_pct": float(delta) if delta is not None else None,
+        "size_ok": size_ok,
+        "h_mix_kJ_mol": float(h_mix) if h_mix is not None else None,
+        "hmix_ok": hmix_ok,
+        "missing_radii": missing_radii,
+        "missing_hmix_pairs": missing_pairs,
+    }
+    return passed, report
+
+
 def create_sample(args):
     """Generate an SQS slab from elements (+optional ratios) and register it.
 
@@ -305,6 +519,7 @@ def create_sample(args):
     composition = None
     counts = None
 
+    hea_report = None
     for attempt in range(1, args.max_attempts + 1):
         fractions = builder.normalize_ratios(
             elements, args.ratios, rng, verbose=(attempt == 1 and random_ratios)
@@ -315,6 +530,48 @@ def create_sample(args):
                 elements[0], size, lattice, args.vacuum
             )
             n_sites = len(template)
+
+        # --- HEA thermodynamic screening ---
+        _, hea_report = _check_hea_criteria(elements, fractions)
+
+        # Atomic size mismatch is a hard error: changing the ratio cannot fix a
+        # fundamentally incompatible element combination.
+        if hea_report["missing_radii"]:
+            raise SystemExit(
+                f"[error] Atomic radii missing for: {', '.join(hea_report['missing_radii'])}. "
+                "Add them to _ATOMIC_RADII_PM to enable the size-mismatch check."
+            )
+        if not hea_report["size_ok"]:
+            raise SystemExit(
+                f"[error] Atomic size mismatch δ = {hea_report['delta_pct']:.2f}% "
+                f"exceeds the HEA threshold of {_HEA_SIZE_DELTA_MAX}%."
+            )
+
+        # Configurational entropy and mixing enthalpy depend on the ratio; retry
+        # when ratios are random, or abort immediately for fixed ratios.
+        entropy_ok = hea_report["entropy_ok"]
+        hmix_ok = hea_report["hmix_ok"]  # None means check was skipped (missing pairs)
+        ratio_criteria_ok = entropy_ok and (hmix_ok is not False)
+        if not ratio_criteria_ok:
+            if not random_ratios:
+                raise SystemExit(
+                    "[error] Specified composition does not satisfy HEA criteria:\n"
+                    f"  ΔS_mix/R = {hea_report['s_mix_over_R']:.3f}  "
+                    f"(need > {_HEA_ENTROPY_MIN / _R:.1f})  "
+                    f"{'OK' if entropy_ok else 'FAIL'}\n"
+                    f"  ΔH_mix   = "
+                    + (f"{hea_report['h_mix_kJ_mol']:.2f} kJ/mol" if hea_report["h_mix_kJ_mol"] is not None else "N/A")
+                    + f"  (need [{_HEA_HMIX_MIN}, {_HEA_HMIX_MAX}] kJ/mol)  "
+                    + ("OK" if hmix_ok is True else ("FAIL" if hmix_ok is False else "SKIP"))
+                )
+            if attempt == args.max_attempts:
+                raise SystemExit(
+                    f"[error] Could not find a composition satisfying entropy and "
+                    f"mixing-enthalpy HEA criteria after {args.max_attempts} attempts."
+                )
+            continue  # draw new random fractions
+        # -----------------------------------
+
         candidate_counts = builder.largest_remainder_counts(fractions, n_sites)
         candidate = composition_from_counts(elements, candidate_counts)
         surface_id = surface_id_from_composition(candidate)
@@ -342,6 +599,29 @@ def create_sample(args):
     print("Composition   :")
     for element, count in composition:
         print(f"  {element:>3s} : {count:>3d} atoms ({count / n_sites * 100:6.2f}%)")
+    if hea_report is not None:
+        print("HEA criteria  :")
+        print(
+            f"  ΔS_mix/R = {hea_report['s_mix_over_R']:.3f}"
+            f"  (threshold > {_HEA_ENTROPY_MIN / _R:.1f})  "
+            f"{'[OK]' if hea_report['entropy_ok'] else '[FAIL]'}"
+        )
+        if hea_report["delta_pct"] is not None:
+            print(
+                f"  δ        = {hea_report['delta_pct']:.2f}%"
+                f"  (threshold ≤ {_HEA_SIZE_DELTA_MAX}%)  "
+                f"{'[OK]' if hea_report['size_ok'] else '[FAIL]'}"
+            )
+        else:
+            print(f"  δ        = N/A  (missing radii: {', '.join(hea_report['missing_radii'])})")
+        if hea_report["h_mix_kJ_mol"] is not None:
+            print(
+                f"  ΔH_mix   = {hea_report['h_mix_kJ_mol']:.2f} kJ/mol"
+                f"  (threshold [{_HEA_HMIX_MIN}, {_HEA_HMIX_MAX}] kJ/mol)  "
+                f"{'[OK]' if hea_report['hmix_ok'] else '[FAIL]'}"
+            )
+        else:
+            print(f"  ΔH_mix   = N/A  (missing pairs: {', '.join(hea_report['missing_hmix_pairs'])})")
     print("=" * 60)
 
     # Random substitution -> initial structure, then optional SQS refinement.
@@ -462,14 +742,16 @@ def record_relaxed(args):
         manifest.setdefault("files", {})["relaxed_cif"] = relpath_or_none(
             relaxed_target, paths["surface"]
         )
+        if args.energy is not None:
+            manifest["total_energy_eV"] = args.energy
         write_json(paths["surface_manifest"], manifest)
 
     with connect_db(args.root) as con:
         con.execute(
-            "UPDATE surfaces SET relaxed_cif=?, status=?, updated_at=? "
+            "UPDATE surfaces SET relaxed_cif=?, status=?, total_energy_eV=?, updated_at=? "
             "WHERE surface_id=?",
             (relpath_or_none(relaxed_target, paths["surface"]), "slab_relaxed",
-             utc_now(), args.surface_id),
+             args.energy, utc_now(), args.surface_id),
         )
         con.execute(
             "DELETE FROM artifacts WHERE surface_id=? AND kind='relaxed_cif'",
@@ -1097,6 +1379,10 @@ def build_parser():
     )
     add_common_surface_args(sp)
     sp.add_argument("--relaxed-cif", required=True, help="Relaxed slab CIF.")
+    sp.add_argument(
+        "--energy", type=float, default=None,
+        help="Total DFT energy of the relaxed slab in eV (from OUTCAR TOTEN).",
+    )
     sp.set_defaults(func=record_relaxed)
 
     sp = sub.add_parser("index-surface", help="Build top atom metadata/grid.")

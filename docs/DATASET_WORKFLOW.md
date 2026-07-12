@@ -189,3 +189,53 @@ The basis mapping is written by default to:
 ```text
 dataset/Co_13-Cr_13-Fe_13-Mn_12-Ni_13/openmx_slab/hamiltonian_d_surface.npz.basis.jsonl
 ```
+
+## 9. Merge Two Datasets
+
+`merge` combines every surface from a source dataset into a destination dataset.
+Because a dataset is an SQLite index *plus* the per-surface directories it points
+at, this cannot be done by copying rows alone: `merge` copies each
+`<surface_id>/` directory to the destination and re-roots the stored path
+columns so they point at their new location.
+
+```bash
+python hea_dataset.py merge \
+  --root dataset \
+  --source other_dataset
+```
+
+`--root` is the destination (rows are written into it); `--source` is the
+dataset being merged in. Both datasets must share the same schema version, or
+the command aborts before making any change.
+
+For each source surface the command copies its directory and index rows, then
+rewrites the in-dataset path columns (`surfaces.path`, `artifacts.path`,
+`adsorbate_configs.path`, `hamiltonian_exports.output_npz`) to the destination
+root. Relative columns (`initial_cif`, `relaxed_cif`) and external paths
+(`hamiltonian_exports.scfout_path`) are left unchanged.
+
+### Handling `surface_id` conflicts
+
+Because `surface_id` is the composition-based primary key, a surface already
+present in the destination is a conflict. By default `merge` prints the
+conflict and prompts for a decision per surface:
+
+```text
+[conflict] surface_id already exists in destination: Co_13-Cr_13-Fe_13-Mn_12-Ni_13
+  [o]verwrite / [s]kip / [a]bort merge?
+```
+
+- `o` — delete the destination surface (index rows and directory) and replace it
+  with the source copy.
+- `s` — leave the destination surface untouched and skip the source one.
+- `a` — abort the whole merge.
+
+For non-interactive runs, set the policy up front with `--on-conflict`:
+
+```bash
+python hea_dataset.py merge --root dataset --source other_dataset --on-conflict skip
+```
+
+Choices are `ask` (default), `skip`, and `overwrite`. The merge writes into the
+destination in place, and `overwrite` deletes the replaced directory, so back up
+the destination first if the source is not fully trusted.

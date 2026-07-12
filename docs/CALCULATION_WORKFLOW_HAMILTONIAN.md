@@ -1,6 +1,6 @@
 # HEA DFT 数据库自动化计算工作流
 
-本工作流通过 `scripts/run-workflow.sh` 一键驱动以下全部步骤，在 Slurm 登录节点运行，自动阻塞等待每一阶段完成后再推进：
+本工作流通过 `scripts/run-hamiltonian-workflow.sh` 一键驱动以下全部步骤，在 Slurm 登录节点运行，自动阻塞等待每一阶段完成后再推进。以下命令均从项目根目录执行：
 
 1. 生成并注册初始 HEA 表面结构（SQS）
 2. VASP slab 弛豫 → 收敛判定 → 自动续算 → 弛豫结构入库
@@ -27,7 +27,7 @@ scripts/
   vasp-gam.slurm          # VASP 提交脚本，含自检自投逻辑（已改造）
   check-convergence.sh    # 收敛判定（纯读取，无副作用）
   openmx.slurm            # OpenMX 提交模板（已有）
-  run-workflow.sh         # 全流程自动化驱动脚本
+    run-hamiltonian-workflow.sh  # 全流程自动化驱动脚本
 hea_dataset.py            # 数据集管理工具
 cif_to_openmx.py          # CIF -> OpenMX .dat 转换
 ```
@@ -40,24 +40,33 @@ cif_to_openmx.py          # CIF -> OpenMX .dat 转换
 
 ```bash
 # 指定元素，比例随机生成
-bash scripts/run-workflow.sh \
+bash scripts/run-hamiltonian-workflow.sh \
   -e Fe Co Ni Cr Mn \
   --openmx-data /work/home/<user>/openmx3.9/DFT_DATA19
 
 # 指定元素和比例（等比例）
-bash scripts/run-workflow.sh \
+bash scripts/run-hamiltonian-workflow.sh \
   -e Fe Co Ni Cr Mn -r 1 1 1 1 1 \
   --openmx-data /work/home/<user>/openmx3.9/DFT_DATA19
 
 # 组成已存在时，跳过第 1 步从弛豫开始续跑
-bash scripts/run-workflow.sh \
+bash scripts/run-hamiltonian-workflow.sh \
   --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
   --openmx-data /work/home/<user>/openmx3.9/DFT_DATA19
 
 # 只运行到第 3 步（不做 OpenMX）
-bash scripts/run-workflow.sh \
+bash scripts/run-hamiltonian-workflow.sh \
   -e Fe Co Ni Cr Mn --skip-hamilton \
   --openmx-data /work/home/<user>/openmx3.9/DFT_DATA19
+
+# 集群环境无 Terminal 输出，后台计算
+nohup bash HEA-tools/scripts/run-hamiltonian-workflow.sh \
+  -e Fe Co Ni Cu Zn \
+  -r 1 1 1 1 1 \
+  --openmx-data ~/DFT_DATA19 \
+  --root ./dataset \
+  --workspace ./workspace \
+  > ./logs/FeCoNiCuZn.log 2>&1 &
 ```
 
 **完整参数列表：**
@@ -91,7 +100,7 @@ mkdir -p workspace
 
 ### 步骤 1：生成并注册初始 HEA 结构
 
-`run-workflow.sh` 调用：
+`run-hamiltonian-workflow.sh` 调用：
 
 ```bash
 python hea_dataset.py create-sample --root dataset \
@@ -102,7 +111,7 @@ python hea_dataset.py create-sample --root dataset \
 
 1. 按比例（随机或指定）→ Vegard 定律估算晶格常数 → 在 4×4×4 FCC(111) slab（64 个位点）上用最大余数法分配整数原子数，得到候选组成。
 2. 检查该 `surface_id` 是否已在数据库或磁盘上存在：
-   - 比例随机时撞车 → 重新抽样重试（上限 1000 次）。
+   - 比例随机时撞车 → 重新抽样重试（上限 500 次）。
    - 比例固定时撞车 → 报错退出。
 3. 组成唯一后，随机替代原子 → SQS（icet）优化元素分布 → 按元素字母序排列原子 → 写 `00_initial_sqs.cif`。
 
@@ -121,7 +130,7 @@ dataset/
     openmx_slab/
 ```
 
-`surface_id`（如 `Co_13-Cr_13-Fe_13-Mn_12-Ni_13`）由 `run-workflow.sh` 自动从输出中解析，无需手动传入后续步骤。
+`surface_id`（如 `Co_13-Cr_13-Fe_13-Mn_12-Ni_13`）由 `run-hamiltonian-workflow.sh` 自动从输出中解析，无需手动传入后续步骤。
 
 ---
 
@@ -129,7 +138,7 @@ dataset/
 
 #### 2a. 准备计算目录
 
-`run-workflow.sh` 在 `workspace/<surface_id>/slab-relax/` 中：
+`run-hamiltonian-workflow.sh` 在 `workspace/<surface_id>/slab-relax/` 中：
 
 1. 将 `00_initial_sqs.cif` 复制为 `<surface_id>.cif`。
 2. 运行 `vasp-inputs.sh <surface_id>.cif`，生成：
@@ -173,7 +182,7 @@ SCF 病态阈值可通过环境变量 `SCF_STALL_LIMIT` 覆盖（默认 3）。
 
 #### 2c. 收敛后入库
 
-`run-workflow.sh` 检测到 `CONVERGED` 标记后：
+`run-hamiltonian-workflow.sh` 检测到 `CONVERGED` 标记后：
 
 1. 用 ASE 将 `CONTCAR` 转为 CIF 格式（保留 POSCAR 的元素顺序）。
 2. 调用 `record-relaxed`，校验组成一致、原子数和元素顺序不变后入库：
@@ -215,7 +224,7 @@ dataset/<surface_id>/metadata/
 
 ### 步骤 4：Hamiltonian 计算与入库
 
-`run-workflow.sh` 在 `workspace/<surface_id>/hamilton/` 中执行：
+`run-hamiltonian-workflow.sh` 在 `workspace/<surface_id>/hamilton/` 中执行：
 
 **4a. 生成 OpenMX 输入：**
 
@@ -230,7 +239,7 @@ python cif_to_openmx.py \
 
 **4b. 提交 OpenMX 作业：**
 
-`run-workflow.sh` 从 `scripts/openmx.slurm` 模板自动替换：
+`run-hamiltonian-workflow.sh` 从 `scripts/openmx.slurm` 模板自动替换：
 - 任务名 → `<surface_id>-hamilton`
 - 输入文件 → `openmx input.dat`
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# run-workflow.sh — end-to-end driver for the HEA DFT dataset workflow described
-# in CALCULATION_WORKFLOW.md. It runs on the Slurm login node and blocks until
-# each stage finishes, driving:
+# run-hamiltonian-workflow.sh — end-to-end driver for the HEA DFT dataset
+# workflow described in docs/CALCULATION_WORKFLOW_HAMILTONIAN.md. It runs on the Slurm login
+# node and blocks until each stage finishes, driving:
 #
 #   1. create-sample        -> register a new HEA composition (initial slab)
 #   2. slab-relax (VASP)     -> self-resubmitting relaxation, CONTCAR -> cif,
@@ -11,8 +11,8 @@
 #   4. hamilton (OpenMX)     -> SCF, then extract-hamiltonian into the dataset
 #
 # Usage:
-#   run-workflow.sh -e Fe Co Ni Cr Mn [options]
-#   run-workflow.sh --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 [options]   # skip step 1
+#   run-hamiltonian-workflow.sh -e Fe Co Ni Cr Mn [options]
+#   run-hamiltonian-workflow.sh --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 [options]   # skip step 1
 #
 # Options:
 #   -e, --elements EL...     elements for create-sample (step 1)
@@ -22,7 +22,7 @@
 #       --workspace DIR      calculation workspace (default: workspace)
 #       --openmx-data DIR    server-side OpenMX DFT_DATA path (default: DFT_DATA19)
 #       --poll SECONDS       job-state poll interval (default: 60)
-#       --max-gen N          max VASP relaxation generations (default: 5)
+#       --max-gen N          max VASP relaxation generations (default: 2)
 #       --skip-hamilton      stop after step 3
 #   -h, --help
 
@@ -46,6 +46,13 @@ ratios=()
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 log() { printf '[workflow] %s\n' "$*" >&2; }
 
+# True while a Slurm job with the given name is still queued/running. The VASP
+# self-resubmit chain keeps the same job name across generations, so this stays
+# true for the whole chain and only turns false once it leaves the queue.
+job_alive() {
+    squeue -h -u "${USER:-$(id -un)}" -n "$1" 2>/dev/null | grep -q .
+}
+
 # --- argument parsing --------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,7 +71,7 @@ while [[ $# -gt 0 ]]; do
         --poll)       poll=$2; shift 2 ;;
         --max-gen)    max_gen=$2; shift 2 ;;
         --skip-hamilton) skip_hamilton=1; shift ;;
-        -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -81,9 +88,15 @@ wait_for_job() {
     done
 }
 
-# Wait until one of the given marker files appears in a directory.
+# Wait until one of the given marker files appears in a directory, printing the
+# marker name. As a fallback for chains that die without writing one (hard node
+# failure, wallclock kill), print "GONE" once the named Slurm job has been
+# absent from the queue for two consecutive polls with still no marker. Two
+# polls avoid a false positive during the brief gap while one generation exits
+# and the next is submitted.
 wait_for_marker() {
-    local dir=$1; shift
+    local dir=$1 job=$2; shift 2
+    local dead=0
     log "waiting for completion markers in ${dir} ..."
     while true; do
         for m in "$@"; do
@@ -92,6 +105,15 @@ wait_for_marker() {
                 return 0
             fi
         done
+        if job_alive "$job"; then
+            dead=0
+        else
+            dead=$((dead + 1))
+            if [[ "$dead" -ge 2 ]]; then
+                printf 'GONE\n'
+                return 0
+            fi
+        fi
         sleep "$poll"
     done
 }
@@ -138,10 +160,11 @@ chmod +x "${relax_dir}/check-convergence.sh"
     sbatch --export=ALL,MAX_GEN="$max_gen" vasp-gam.slurm
 )
 
-marker=$(wait_for_marker "$relax_dir" \
+marker=$(wait_for_marker "$relax_dir" "$surface_id" \
     CONVERGED NOT_CONVERGED_MAX_GEN CRASHED SCF_ILL CHECK_ERROR)
 case "$marker" in
     CONVERGED) log "step 2: relaxation converged." ;;
+    GONE) die "step 2: VASP job '${surface_id}' left the queue without a marker (killed or timed out). See ${relax_dir}." ;;
     *) die "step 2: relaxation did not converge (marker: ${marker}). See ${relax_dir}." ;;
 esac
 

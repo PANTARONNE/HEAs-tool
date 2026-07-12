@@ -28,7 +28,7 @@ import numpy as np
 
 
 SCHEMA_VERSION = 2
-DEFAULT_MAX_ATTEMPTS = 1000
+DEFAULT_MAX_ATTEMPTS = 500
 METALS_DEFAULT = [
     "Fe", "Co", "Ni", "Cu", "Mo", "Zn", "Ga", "In", "Sn", "W",
     "Cr", "Mn", "Pd", "Pt", "Rh", "Ir",
@@ -45,7 +45,8 @@ _R = 8.314
 _HEA_ENTROPY_MIN    =  1.5 * _R  # ΔS_mix > 1.5 R  [J mol⁻¹ K⁻¹]
 _HEA_SIZE_DELTA_MAX =  6.6       # δ ≤ 6.6 %
 _HEA_HMIX_MIN       = -15.0      # ΔH_mix lower bound  [kJ mol⁻¹]
-_HEA_HMIX_MAX       =   5.0      # ΔH_mix upper bound  [kJ mol⁻¹]
+_HEA_HMIX_MAX       =  5.0       # ΔH_mix upper bound  [kJ mol⁻¹]
+_HEA_VEC_MIN        =  8.0       # VEC ≥ 8  (fcc-stabilizing regime)
 
 # Metallic atomic radii [pm].
 # Source: Kittel, "Introduction to Solid State Physics", 8th ed., Table 1.
@@ -60,6 +61,24 @@ _ATOMIC_RADII_PM = {
     "Mo": 139.0,
     "W":  139.0,
     "Sn": 151.0,
+}
+
+# Valence electron count (VEC) per element.
+# Convention (Guo & Liu, Prog. Nat. Sci. 2011): transition metals use the full
+# group number (s + d electrons); p-block metals use s + p valence electrons.
+# VEC of a composition is the atomic-fraction-weighted mean of these values.
+# Add any missing element here to enable the VEC check for that composition.
+_VALENCE_ELECTRONS = {
+    "Fe": 8.0,
+    "Co": 9.0,
+    "Ni": 10.0,
+    "Cu": 11.0,
+    "Zn": 12.0,
+    "Ga": 3.0,
+    "In": 3.0,
+    "Mo": 6.0,
+    "W":  6.0,
+    "Sn": 4.0,
 }
 
 # Binary mixing enthalpies ΔH^{A-B}_mix [kJ mol⁻¹].
@@ -201,7 +220,7 @@ def sha256_file(path):
 
 def surface_id_from_composition(composition):
     # Preserve user-specified element order; it usually follows the alloy name.
-    return "-".join(f"{el}_{count}" for el, count in composition)
+    return "".join(f"{el}{count}" for el, count in composition)
 
 
 def composition_from_cif(path):
@@ -367,7 +386,7 @@ def init_db(root):
         "schema_version": SCHEMA_VERSION,
         "created_or_updated_at": utc_now(),
         "layout": "<surface_id>",
-        "surface_id_rule": "element_atom_count_pairs_only",
+        "surface_id_rule": "concatenated_element_atom_count_pairs_only",
     })
     print(f"[done] Initialized dataset at {paths['root']}")
 
@@ -436,7 +455,7 @@ def _check_hea_criteria(elements, fractions):
     # -----------------------------------------------------------------------
     nonzero = xs > 1e-12
     s_mix = -_R * np.sum(xs[nonzero] * np.log(xs[nonzero]))
-    entropy_ok = s_mix > _HEA_ENTROPY_MIN
+    entropy_ok = bool(s_mix > _HEA_ENTROPY_MIN)
 
     # -----------------------------------------------------------------------
     # 2. Atomic size mismatch:  δ = 100 × sqrt(Σ x_i (1 - r_i / r̄)²)
@@ -451,7 +470,7 @@ def _check_hea_criteria(elements, fractions):
         radii = radii.astype(float)
         r_bar = np.sum(xs * radii)
         delta = 100.0 * np.sqrt(np.sum(xs * ((1.0 - radii / r_bar) ** 2)))
-        size_ok = delta <= _HEA_SIZE_DELTA_MAX
+        size_ok = bool(delta <= _HEA_SIZE_DELTA_MAX)
 
     # -----------------------------------------------------------------------
     # 3. Mixing enthalpy:  ΔH_mix ≈ Σ_{i<j} 4·ΔH^{ij}_binary · x_i · x_j
@@ -476,10 +495,27 @@ def _check_hea_criteria(elements, fractions):
         h_mix = None
         hmix_ok = None
     else:
-        hmix_ok = _HEA_HMIX_MIN <= h_mix <= _HEA_HMIX_MAX
+        hmix_ok = bool(_HEA_HMIX_MIN <= h_mix <= _HEA_HMIX_MAX)
+
+    # -----------------------------------------------------------------------
+    # 4. Valence electron concentration:  VEC = Σ x_i · VEC_i
+    #    Criterion: VEC ≥ 8
+    # -----------------------------------------------------------------------
+    vec_values = np.array([_VALENCE_ELECTRONS.get(el) for el in elements])
+    missing_vec = [el for el, v in zip(elements, vec_values) if v is None]
+    if missing_vec:
+        vec = None
+        vec_ok = None
+    else:
+        vec = float(np.sum(xs * vec_values.astype(float)))
+        vec_ok = bool(vec >= _HEA_VEC_MIN)
 
     # All computable checks must pass
-    passed = all(c is True for c in [entropy_ok, size_ok, hmix_ok] if c is not None)
+    passed = all(
+        c is True
+        for c in [entropy_ok, size_ok, hmix_ok, vec_ok]
+        if c is not None
+    )
 
     report = {
         "s_mix_over_R": float(s_mix / _R),
@@ -488,8 +524,11 @@ def _check_hea_criteria(elements, fractions):
         "size_ok": size_ok,
         "h_mix_kJ_mol": float(h_mix) if h_mix is not None else None,
         "hmix_ok": hmix_ok,
+        "vec": vec,
+        "vec_ok": vec_ok,
         "missing_radii": missing_radii,
         "missing_hmix_pairs": missing_pairs,
+        "missing_vec": missing_vec,
     }
     return passed, report
 
@@ -534,24 +573,21 @@ def create_sample(args):
         # --- HEA thermodynamic screening ---
         _, hea_report = _check_hea_criteria(elements, fractions)
 
-        # Atomic size mismatch is a hard error: changing the ratio cannot fix a
-        # fundamentally incompatible element combination.
-        if hea_report["missing_radii"]:
-            raise SystemExit(
-                f"[error] Atomic radii missing for: {', '.join(hea_report['missing_radii'])}. "
-                "Add them to _ATOMIC_RADII_PM to enable the size-mismatch check."
-            )
-        if not hea_report["size_ok"]:
-            raise SystemExit(
-                f"[error] Atomic size mismatch δ = {hea_report['delta_pct']:.2f}% "
-                f"exceeds the HEA threshold of {_HEA_SIZE_DELTA_MAX}%."
-            )
-
-        # Configurational entropy and mixing enthalpy depend on the ratio; retry
-        # when ratios are random, or abort immediately for fixed ratios.
+        # Entropy, size mismatch, mixing enthalpy and VEC all depend on the
+        # ratio, so we retry when ratios are random, or abort immediately for
+        # fixed ratios. A criterion whose inputs are missing evaluates to None
+        # and is skipped (treated as non-blocking), mirroring the mixing-enthalpy
+        # behaviour for incomplete binary-pair data.
         entropy_ok = hea_report["entropy_ok"]
-        hmix_ok = hea_report["hmix_ok"]  # None means check was skipped (missing pairs)
-        ratio_criteria_ok = entropy_ok and (hmix_ok is not False)
+        size_ok = hea_report["size_ok"]  # None means skipped (missing radii)
+        hmix_ok = hea_report["hmix_ok"]  # None means skipped (missing pairs)
+        vec_ok = hea_report["vec_ok"]    # None means skipped (missing VEC data)
+        ratio_criteria_ok = (
+            entropy_ok
+            and (size_ok is not False)
+            and (hmix_ok is not False)
+            and (vec_ok is not False)
+        )
         if not ratio_criteria_ok:
             if not random_ratios:
                 raise SystemExit(
@@ -559,15 +595,26 @@ def create_sample(args):
                     f"  ΔS_mix/R = {hea_report['s_mix_over_R']:.3f}  "
                     f"(need > {_HEA_ENTROPY_MIN / _R:.1f})  "
                     f"{'OK' if entropy_ok else 'FAIL'}\n"
+                    f"  δ        = "
+                    + (f"{hea_report['delta_pct']:.2f}%" if hea_report["delta_pct"] is not None else "N/A")
+                    + f"  (need ≤ {_HEA_SIZE_DELTA_MAX}%)  "
+                    + ("OK" if size_ok is True else ("FAIL" if size_ok is False else "SKIP"))
+                    + "\n"
                     f"  ΔH_mix   = "
                     + (f"{hea_report['h_mix_kJ_mol']:.2f} kJ/mol" if hea_report["h_mix_kJ_mol"] is not None else "N/A")
                     + f"  (need [{_HEA_HMIX_MIN}, {_HEA_HMIX_MAX}] kJ/mol)  "
                     + ("OK" if hmix_ok is True else ("FAIL" if hmix_ok is False else "SKIP"))
+                    + "\n"
+                    f"  VEC      = "
+                    + (f"{hea_report['vec']:.2f}" if hea_report["vec"] is not None else "N/A")
+                    + f"  (need ≥ {_HEA_VEC_MIN:.1f})  "
+                    + ("OK" if vec_ok is True else ("FAIL" if vec_ok is False else "SKIP"))
                 )
             if attempt == args.max_attempts:
                 raise SystemExit(
-                    f"[error] Could not find a composition satisfying entropy and "
-                    f"mixing-enthalpy HEA criteria after {args.max_attempts} attempts."
+                    f"[error] Could not find a composition satisfying the entropy, "
+                    f"size-mismatch, mixing-enthalpy and VEC HEA criteria after "
+                    f"{args.max_attempts} attempts."
                 )
             continue  # draw new random fractions
         # -----------------------------------
@@ -622,6 +669,14 @@ def create_sample(args):
             )
         else:
             print(f"  ΔH_mix   = N/A  (missing pairs: {', '.join(hea_report['missing_hmix_pairs'])})")
+        if hea_report["vec"] is not None:
+            print(
+                f"  VEC      = {hea_report['vec']:.2f}"
+                f"  (threshold ≥ {_HEA_VEC_MIN:.1f})  "
+                f"{'[OK]' if hea_report['vec_ok'] else '[FAIL]'}"
+            )
+        else:
+            print(f"  VEC      = N/A  (missing VEC data: {', '.join(hea_report['missing_vec'])})")
     print("=" * 60)
 
     # Random substitution -> initial structure, then optional SQS refinement.
@@ -1087,11 +1142,26 @@ def create_adsorbate_records(args):
     ads_root = paths["adsorbates"] / args.adsorbate
     ads_root.mkdir(parents=True, exist_ok=True)
 
+    rebuild = getattr(args, "rebuild_initial", False)
+    created = 0
+    preserved = 0
     with connect_db(args.root) as con:
         for site in fcc_rows:
             site_id = site["site_id"]
             config_id = f"{args.surface_id}_{args.adsorbate}_{site_id}"
             config_path = ads_root / site_id
+            initial_adsorbate_cif = config_path / "00_initial_adsorbate.cif"
+
+            # Non-destructive resume: never clobber a config that already exists,
+            # since it may carry a computed adsorption energy. Only an explicit
+            # --rebuild-initial regenerates the structure and resets the status.
+            already = con.execute(
+                "SELECT 1 FROM adsorbate_configs WHERE config_id=?", (config_id,)
+            ).fetchone() is not None
+            if not rebuild and already and initial_adsorbate_cif.is_file():
+                preserved += 1
+                continue
+
             config_path.mkdir(parents=True, exist_ok=True)
             site_geometry = {
                 "plane_pos": np.array(
@@ -1102,7 +1172,6 @@ def create_adsorbate_records(args):
             adsorbed = ads.add_adsorbate(
                 slab, site_geometry, args.adsorbate, normal, args.height, args.nh
             )
-            initial_adsorbate_cif = config_path / "00_initial_adsorbate.cif"
             ads.write_cif(str(initial_adsorbate_cif), adsorbed)
             record = {
                 "surface_id": args.surface_id,
@@ -1130,8 +1199,12 @@ def create_adsorbate_records(args):
                     None, "empty", utc_now(),
                 ),
             )
+            created += 1
         con.commit()
-    print(f"[done] Created adsorbate records under {ads_root}")
+    print(
+        f"[done] Adsorbate records under {ads_root} "
+        f"(created/reset {created}, preserved {preserved})"
+    )
 
 
 def validate_relaxed_adsorbate(initial_path, relaxed_path, clean_slab_path,
@@ -1312,6 +1385,249 @@ def extract_hamiltonian(args):
     print(f"[info] surface_atoms={len(atom_ids)} spin_channels={h_d.shape[0]}")
 
 
+# ---------------------------------------------------------------------------
+# Dataset merge
+# ---------------------------------------------------------------------------
+
+# Tables carrying per-surface rows, listed so that a row is always inserted
+# after the row it references (surfaces first; adsorbate_configs after
+# fcc_sites, which it points at through a composite foreign key).
+_MERGE_TABLES = [
+    "surfaces",
+    "artifacts",
+    "top_atoms",
+    "fcc_sites",
+    "adsorbate_configs",
+    "hamiltonian_exports",
+]
+
+# Columns holding filesystem paths that live *inside* the surface directory and
+# therefore must be re-rooted under the destination. Relative columns
+# (surfaces.initial_cif/relaxed_cif) and external columns
+# (hamiltonian_exports.scfout_path, which points outside the dataset) are left
+# untouched on purpose.
+_MERGE_PATH_COLS = {
+    "surfaces": ["path"],
+    "artifacts": ["path"],
+    "adsorbate_configs": ["path"],
+    "hamiltonian_exports": ["output_npz"],
+}
+
+# AUTOINCREMENT primary keys must be dropped on insert so the destination
+# assigns fresh ids and two datasets never collide on them.
+_MERGE_AUTOINC_COLS = {
+    "artifacts": ["artifact_id"],
+    "hamiltonian_exports": ["export_id"],
+}
+
+
+def _read_schema_version(db_path):
+    with sqlite3.connect(db_path) as con:
+        has_info = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_info'"
+        ).fetchone()
+        if not has_info:
+            return None
+        row = con.execute(
+            "SELECT value FROM dataset_info WHERE key='schema_version'"
+        ).fetchone()
+        return int(row[0]) if row else None
+
+
+def _rebase_surface_path(path_str, surface_id, dest_root):
+    """Re-root a stored path under ``dest_root/surface_id``.
+
+    Stored paths were written with whatever root the source dataset used (which
+    may be relative or absolute, on another machine, etc.), but they always run
+    through the ``<root>/<surface_id>/...`` layout. We locate the surface_id
+    segment and rebuild everything after it beneath the destination, so the
+    result is correct regardless of the original base. Paths without the
+    surface_id segment (e.g. an external .scfout source) are returned unchanged.
+    """
+    if path_str is None:
+        return None
+    parts = Path(path_str).parts
+    idx = None
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == surface_id:
+            idx = i
+            break
+    if idx is None:
+        return path_str
+    new_path = Path(dest_root) / surface_id
+    for segment in parts[idx + 1:]:
+        new_path = new_path / segment
+    return str(new_path)
+
+
+def _prompt_conflict(surface_id):
+    """Ask the user how to resolve a surface_id already present in the target."""
+    print(f"[conflict] surface_id already exists in destination: {surface_id}")
+    while True:
+        answer = input("  [o]verwrite / [s]kip / [a]bort merge? ").strip().lower()
+        if answer in ("o", "overwrite"):
+            return "overwrite"
+        if answer in ("s", "skip"):
+            return "skip"
+        if answer in ("a", "abort"):
+            raise SystemExit("[abort] Merge cancelled by user.")
+        print("  Please answer o, s or a.")
+
+
+def _delete_surface_everywhere(con, dest_root, surface_id):
+    """Remove a surface from the destination index rows and disk directory."""
+    for table in _MERGE_TABLES:
+        con.execute(f"DELETE FROM {table} WHERE surface_id=?", (surface_id,))
+    dst_dir = Path(dest_root) / surface_id
+    if dst_dir.is_dir():
+        shutil.rmtree(dst_dir)
+
+
+def _copy_surface_dir(src_root, dest_root, surface_id):
+    src_dir = Path(src_root) / surface_id
+    dst_dir = Path(dest_root) / surface_id
+    if not src_dir.is_dir():
+        print(f"[warn] No structure directory on disk for {surface_id}; "
+              "copying index rows only.")
+        return
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    shutil.copytree(src_dir, dst_dir)
+
+
+def _copy_surface_rows(src_con, dst_con, surface_id, dest_root):
+    """Copy every index row belonging to one surface, rewriting path columns."""
+    for table in _MERGE_TABLES:
+        cur = src_con.execute(
+            f"SELECT * FROM {table} WHERE surface_id=?", (surface_id,)
+        )
+        columns = [desc[0] for desc in cur.description]
+        for row in cur.fetchall():
+            record = dict(zip(columns, row))
+            for path_col in _MERGE_PATH_COLS.get(table, ()):
+                if path_col in record:
+                    record[path_col] = _rebase_surface_path(
+                        record[path_col], surface_id, dest_root
+                    )
+            for drop_col in _MERGE_AUTOINC_COLS.get(table, ()):
+                record.pop(drop_col, None)
+            insert_cols = list(record.keys())
+            placeholders = ", ".join("?" * len(insert_cols))
+            dst_con.execute(
+                f"INSERT INTO {table} ({', '.join(insert_cols)}) "
+                f"VALUES ({placeholders})",
+                [record[col] for col in insert_cols],
+            )
+
+
+def merge_datasets(args):
+    """Merge every surface from --source into the --root dataset.
+
+    Both datasets must share the current schema version. Each source surface is
+    copied as its on-disk directory plus its index rows, with in-dataset path
+    columns re-rooted under the destination. When a surface_id already exists in
+    the destination the user is asked (by default) to overwrite, skip or abort.
+    """
+    src_root = Path(args.source)
+    dst_root = Path(args.root)
+    src_db = dataset_paths(src_root)["db"]
+
+    if not src_db.is_file():
+        raise SystemExit(f"[error] Source dataset index not found: {src_db}")
+    if src_root.resolve() == dst_root.resolve():
+        raise SystemExit("[error] Source and destination are the same dataset.")
+
+    src_version = _read_schema_version(src_db)
+    if src_version is None:
+        raise SystemExit(
+            f"[error] Source dataset has no schema_version: {src_root}"
+        )
+    if src_version != SCHEMA_VERSION:
+        raise SystemExit(
+            f"[error] Source schema v{src_version} is incompatible with "
+            f"v{SCHEMA_VERSION}."
+        )
+
+    # Creates the destination if absent and validates its schema otherwise.
+    init_db(dst_root)
+
+    src_con = sqlite3.connect(src_db)
+    dst_con = sqlite3.connect(dataset_paths(dst_root)["db"])
+    try:
+        src_ids = [
+            row[0] for row in src_con.execute(
+                "SELECT surface_id FROM surfaces ORDER BY surface_id"
+            )
+        ]
+        if not src_ids:
+            print("[info] Source dataset has no surfaces; nothing to merge.")
+            return
+
+        added = overwritten = skipped = 0
+        for surface_id in src_ids:
+            if surface_exists(dst_root, surface_id):
+                action = args.on_conflict
+                if action == "ask":
+                    action = _prompt_conflict(surface_id)
+                if action == "skip":
+                    print(f"[skip] {surface_id}")
+                    skipped += 1
+                    continue
+                _delete_surface_everywhere(dst_con, dst_root, surface_id)
+                overwritten += 1
+            else:
+                added += 1
+
+            _copy_surface_dir(src_root, dst_root, surface_id)
+            _copy_surface_rows(src_con, dst_con, surface_id, dst_root)
+            dst_con.commit()
+            print(f"[merge] {surface_id}")
+
+        print("=" * 60)
+        print(f"[done] Merge complete: {added} added, {overwritten} overwritten, "
+              f"{skipped} skipped.")
+    finally:
+        src_con.close()
+        dst_con.close()
+
+
+def delete_surface(args):
+    """Delete one surface: its index rows across all tables and its directory.
+
+    Rows and the on-disk directory are two independent stores, so both are
+    removed together to avoid leaving orphan rows or an orphan folder behind.
+    Deletion is irreversible (shutil.rmtree), hence the confirmation prompt
+    unless --yes is given.
+    """
+    surface_id = args.surface_id
+    if not surface_exists(args.root, surface_id):
+        raise SystemExit(f"[error] Surface not found in dataset: {surface_id}")
+
+    paths = dataset_paths(args.root, surface_id)
+    surface_dir = paths["surface"]
+
+    if not args.yes:
+        print(f"About to permanently delete surface: {surface_id}")
+        print(f"  index rows in : {', '.join(_MERGE_TABLES)}")
+        print(f"  directory     : {surface_dir}")
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            raise SystemExit("[abort] Deletion cancelled.")
+
+    db_path = dataset_paths(args.root)["db"]
+    if db_path.is_file():
+        # _delete_surface_everywhere removes both the index rows and the
+        # on-disk directory for this surface_id.
+        with sqlite3.connect(db_path) as con:
+            _delete_surface_everywhere(con, args.root, surface_id)
+            con.commit()
+    elif surface_dir.is_dir():
+        # No index present, but a structure directory exists on disk.
+        shutil.rmtree(surface_dir)
+
+    print(f"[done] Deleted surface {surface_id}")
+
+
 def add_common_surface_args(p):
     p.add_argument("--root", default="dataset", help="Dataset root directory.")
     p.add_argument("--surface-id", required=True, help="Composition-based surface ID.")
@@ -1421,6 +1737,12 @@ def build_parser():
     sp.add_argument("--side", choices=["top", "bottom"], default="top")
     sp.add_argument("--height", type=float, default=1.25)
     sp.add_argument("--nh", type=float, default=1.02, help="N-H bond length.")
+    sp.add_argument(
+        "--rebuild-initial", action="store_true",
+        help="Regenerate the initial adsorbate structure and reset the energy "
+             "status even for sites that already have a record. Off by default "
+             "so reruns never discard computed adsorption energies.",
+    )
     sp.set_defaults(func=create_adsorbate_records)
 
     sp = sub.add_parser("record-energy", help="Record a manual adsorption energy.")
@@ -1454,6 +1776,32 @@ def build_parser():
     sp.add_argument("-o", "--output", default=None)
     sp.add_argument("--basis-output", default=None)
     sp.set_defaults(func=extract_hamiltonian)
+
+    sp = sub.add_parser(
+        "delete",
+        help="Delete a surface: its index rows and its on-disk directory.",
+    )
+    add_common_surface_args(sp)
+    sp.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip the confirmation prompt (deletion is irreversible).",
+    )
+    sp.set_defaults(func=delete_surface)
+
+    sp = sub.add_parser(
+        "merge",
+        help="Merge all surfaces from a source dataset into --root.",
+    )
+    sp.add_argument("--root", default="dataset", help="Destination dataset root.")
+    sp.add_argument(
+        "--source", required=True, help="Source dataset root to merge from.",
+    )
+    sp.add_argument(
+        "--on-conflict", choices=["ask", "skip", "overwrite"], default="ask",
+        help="How to resolve a surface_id that already exists in the "
+             "destination. 'ask' prompts on the command line for each conflict.",
+    )
+    sp.set_defaults(func=merge_datasets)
 
     return p
 

@@ -31,6 +31,7 @@
 ```text
 scripts/
   run-adsorption-workflow.sh   # 吸附能全流程自动化驱动脚本
+  record-single-site-adsorption.sh  # 手动补记单个位点的吸附能
   vasp-inputs.sh               # 从 CIF 生成 VASP 输入文件（复用）
   vasp-gam.slurm               # VASP 提交脚本，含自检自投逻辑（复用）
   check-convergence.sh         # 收敛判定（纯读取，无副作用，复用）
@@ -267,6 +268,23 @@ workspace/
         site_0002/
         ...
 ```
+
+---
+
+## 手动补记单个位点
+
+若自动工作流将某个位点标记为 `CRASHED`，但手动恢复计算后已经在该位点目录得到
+有效的 `CONTCAR` 和 `OUTCAR`，可直接计算并记录该点，无需修改或移除终止标记：
+
+```bash
+bash scripts/record-single-site-adsorption.sh <surface_id> <site编号>
+```
+
+脚本会从标准的 `workspace`/`dataset` 目录自动识别吸附物种，从数据集读取
+`E(slab)`，从 `OUTCAR` 读取最后一个 `energy without entropy`，计算吸附能并调用
+`record-energy` 入库。如果同一位点存在多个吸附物种，请用 `-a N`（或 `NH`、
+`NH2`、`NH3`）明确指定。手动计算目录不在标准位置时可传入 `--calc-dir DIR`；
+其余选项可运行 `bash scripts/record-single-site-adsorption.sh --help` 查看。
 
 ---
 

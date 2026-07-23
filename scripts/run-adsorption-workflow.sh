@@ -348,12 +348,29 @@ PY
     fi
     log "step 4: ${site_id} E_ads = ${e_ads} eV"
 
-    "$PYTHON" "${repo_dir}/hea_dataset.py" record-energy \
+    # A relaxed adsorbate that has moved beyond record-energy's validation
+    # limit no longer aborts the whole multi-site workflow. Preserve all other
+    # record-energy failures as fatal so filesystem/database problems are not
+    # silently hidden.
+    record_output=""
+    if record_output=$("$PYTHON" "${repo_dir}/hea_dataset.py" record-energy \
         --root "$root" --surface-id "$surface_id" \
         --adsorbate "$adsorbate" --site-id "$s" \
         --relaxed-cif "$relaxed_cif" --energy "$e_ads" \
         --status computed \
-        --notes "auto: E_slab=${slab_energy} eV, E_ref=${ref_energy} eV" >&2
+        --notes "auto: E_slab=${slab_energy} eV, E_ref=${ref_energy} eV" 2>&1
+    ); then
+        [[ -z "$record_output" ]] || printf '%s\n' "$record_output" >&2
+    else
+        record_status=$?
+        [[ -z "$record_output" ]] || printf '%s\n' "$record_output" >&2
+        if [[ "$record_output" == *"Adsorbate moved too far during relaxation:"* ]]; then
+            log "step 4: ${site_id} adsorbate moved too far; skipping."
+            skipped=$((skipped + 1))
+            continue
+        fi
+        exit "$record_status"
+    fi
     recorded=$((recorded + 1))
 done
 

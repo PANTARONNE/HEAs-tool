@@ -3,16 +3,26 @@
 set -Eeuo pipefail
 
 usage() {
-    printf 'Usage: %s <structure.cif>\n' "$(basename "$0")" >&2
+    printf 'Usage: %s <structure.cif> [slurm-template]\n' "$(basename "$0")" >&2
+    printf '  slurm-template: template basename or path (default: vasp-cpu.slurm)\n' >&2
     exit 2
 }
 
-[[ $# -eq 1 ]] || usage
+[[ $# -ge 1 && $# -le 2 ]] || usage
 
 cif_file=$1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 incar_template="${script_dir}/INCAR-opt"
-slurm_template="${script_dir}/vasp-gam.slurm"
+
+# The Slurm template can be given as a plain basename (resolved against the
+# script directory) or an explicit path. Defaults to the CPU template.
+slurm_arg=${2:-vasp-cpu.slurm}
+if [[ "$slurm_arg" == */* ]]; then
+    slurm_template=$slurm_arg
+else
+    slurm_template="${script_dir}/${slurm_arg}"
+fi
+slurm_name=$(basename -- "$slurm_template")
 
 [[ -f "$cif_file" ]] || {
     printf 'Error: CIF file not found: %s\n' "$cif_file" >&2
@@ -120,7 +130,7 @@ job_name=${cif_name%.[cC][iI][fF]}
     exit 1
 }
 
-cp -- "$slurm_template" vasp-gam.slurm
+cp -- "$slurm_template" "$slurm_name"
 awk -v job_name="$job_name" '
     {
         sub(/\r$/, "")
@@ -136,7 +146,7 @@ awk -v job_name="$job_name" '
     {
         print
     }
-' vasp-gam.slurm > vasp-gam.slurm.tmp
-mv -- vasp-gam.slurm.tmp vasp-gam.slurm
+' "$slurm_name" > "${slurm_name}.tmp"
+mv -- "${slurm_name}.tmp" "$slurm_name"
 
-printf 'Generated VASP inputs and vasp-gam.slurm (job name: %s) in %s\n' "$job_name" "$PWD"
+printf 'Generated VASP inputs and %s (job name: %s) in %s\n' "$slurm_name" "$job_name" "$PWD"

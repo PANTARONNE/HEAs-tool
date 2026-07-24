@@ -23,6 +23,7 @@
 #       --openmx-data DIR    server-side OpenMX DFT_DATA path (default: DFT_DATA19)
 #       --poll SECONDS       job-state poll interval (default: 60)
 #       --max-gen N          max VASP relaxation generations (default: 2)
+#       --slurm FILE         VASP Slurm template basename or path (default: vasp-cpu.slurm)
 #       --skip-hamilton      stop after step 3
 #   -h, --help
 
@@ -38,6 +39,7 @@ workspace="workspace"
 openmx_data="DFT_DATA19"
 poll=60
 max_gen=2
+slurm_template="vasp-cpu.slurm"
 skip_hamilton=0
 surface_id=""
 elements=()
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --openmx-data) openmx_data=$2; shift 2 ;;
         --poll)       poll=$2; shift 2 ;;
         --max-gen)    max_gen=$2; shift 2 ;;
+        --slurm)      slurm_template=$2; shift 2 ;;
         --skip-hamilton) skip_hamilton=1; shift ;;
         -h|--help)    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
@@ -78,6 +81,10 @@ done
 
 command -v sbatch >/dev/null 2>&1 || die "sbatch not found; run on a Slurm login node."
 [[ -f "${repo_dir}/hea_dataset.py" ]] || die "hea_dataset.py not found in ${repo_dir}."
+
+# Basename of the Slurm template as it lands in the job directory (what sbatch
+# submits). vasp-inputs.sh copies the template there under this same name.
+slurm_name=$(basename -- "$slurm_template")
 
 # Wait until a Slurm job leaves the queue (completed, failed or cancelled).
 wait_for_job() {
@@ -154,10 +161,10 @@ chmod +x "${relax_dir}/check-convergence.sh"
     cd "$relax_dir"
     # vasp-inputs.sh builds INCAR/POSCAR/POTCAR/KPOINTS and a job-named slurm
     # script; the surface-id has no spaces so it is a valid Slurm job name.
-    bash "${script_dir}/vasp-inputs.sh" "${surface_id}.cif"
+    bash "${script_dir}/vasp-inputs.sh" "${surface_id}.cif" "$slurm_template"
     echo 1 > .gen_count
     rm -f CONVERGED NOT_CONVERGED_MAX_GEN CRASHED SCF_ILL CHECK_ERROR
-    sbatch --export=ALL,MAX_GEN="$max_gen" vasp-gam.slurm
+    sbatch --export=ALL,MAX_GEN="$max_gen" "$slurm_name"
 )
 
 marker=$(wait_for_marker "$relax_dir" "$surface_id" \

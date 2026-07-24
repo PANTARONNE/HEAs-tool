@@ -33,7 +33,8 @@ scripts/
   run-adsorption-workflow.sh   # 吸附能全流程自动化驱动脚本
   record-single-site-adsorption.sh  # 手动补记单个位点的吸附能
   vasp-inputs.sh               # 从 CIF 生成 VASP 输入文件（复用）
-  vasp-gam.slurm               # VASP 提交脚本，含自检自投逻辑（复用）
+  vasp-cpu.slurm               # VASP CPU 提交脚本，含自检自投逻辑（默认，复用）
+  vasp-dcu.slurm               # VASP DCU/GPU 提交脚本，含自检自投逻辑（复用）
   check-convergence.sh         # 收敛判定（纯读取，无副作用，复用）
 hea_dataset.py                 # 数据集管理工具
 add_fcc_adsorbate.py           # FCC 位点检测与吸附物放置
@@ -49,31 +50,31 @@ add_fcc_adsorbate.py           # FCC 位点检测与吸附物放置
 ```bash
 # 计算 N 在所有 FCC 位点的吸附能（比例已在工作流 1 确定）
 bash scripts/run-adsorption-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   -a N
 
 # 只计算指定位点（例如第 5 个）
 bash scripts/run-adsorption-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   -a NH2 --site 5
 
 # 计算多个指定位点
 bash scripts/run-adsorption-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   -a NH --site 1 3 5
 
 # 命令行临时提供参考能量与 slab 能量（不改脚本）
 bash scripts/run-adsorption-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   -a N --ref-energy -16.63 --slab-energy -412.35
 
 # 集群环境后台运行，日志重定向
 nohup bash scripts/run-adsorption-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   -a N \
   --root ./dataset \
   --workspace ./workspace \
-  > ./logs/Co-Cr-Fe-Mn-Ni_N.log 2>&1 &
+  > ./logs/Co13Cr13Fe13Mn12Ni13_N.log 2>&1 &
 ```
 
 **完整参数列表：**
@@ -175,14 +176,14 @@ dataset/<surface_id>/adsorbates/<SP>/site_XXXX/
 #### 3a. 准备计算目录
 
 1. 将 `00_initial_adsorbate.cif` 复制为 `<surface_id>_<SP>_site_XXXX.cif`（作为 Slurm 作业名，无空格）。
-2. 运行 `vasp-inputs.sh`，生成 `POSCAR`（`z ∈ [0, 0.46]` 的底层原子被固定，吸附物在顶部不受约束）、`INCAR`、`POTCAR`、`KPOINTS`（Gamma-only）及 `vasp-gam.slurm`。
+2. 运行 `vasp-inputs.sh`，生成 `POSCAR`（`z ∈ [0, 0.46]` 的底层原子被固定，吸附物在顶部不受约束）、`INCAR`、`POTCAR`、`KPOINTS`（Gamma-only）及 `vasp-cpu.slurm`（默认，可用 `--slurm vasp-dcu.slurm` 切换）。
 3. 复制 `check-convergence.sh`，初始化 `.gen_count = 1`，提交第一代作业。
 
 **所有选定位点的作业并行提交**，随后脚本统一轮询各位点目录的终止标记，全部离队后再推进。
 
-#### 3b. 自检自投链（`vasp-gam.slurm`）
+#### 3b. 自检自投链（`vasp-cpu.slurm` / `vasp-dcu.slurm`）
 
-与工作流 1 完全相同：每次 `vasp_gam` 结束后备份本代输出到 `gen_01/`（`gen_02/`…），运行 `check-convergence.sh` 判定：
+与工作流 1 完全相同：每次 VASP 结束后备份本代输出到 `gen_01/`（`gen_02/`…），运行 `check-convergence.sh` 判定：
 
 ```
 退出码 0  → 写 CONVERGED，链结束
@@ -257,7 +258,7 @@ workspace/
       <SP>/
         site_0001/
           INCAR  POSCAR  POTCAR  KPOINTS
-          vasp-gam.slurm
+          vasp-cpu.slurm
           check-convergence.sh
           .gen_count
           CONTCAR  OUTCAR  OSZICAR  ...

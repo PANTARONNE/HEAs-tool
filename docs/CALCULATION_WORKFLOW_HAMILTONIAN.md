@@ -24,7 +24,8 @@
 ```text
 scripts/
   vasp-inputs.sh          # 从 CIF 生成 VASP 输入文件（已有）
-  vasp-gam.slurm          # VASP 提交脚本，含自检自投逻辑（已改造）
+  vasp-cpu.slurm          # VASP CPU 提交脚本，含自检自投逻辑（默认）
+  vasp-dcu.slurm          # VASP DCU/GPU 提交脚本，含自检自投逻辑
   check-convergence.sh    # 收敛判定（纯读取，无副作用）
   openmx.slurm            # OpenMX 提交模板（已有）
     run-hamiltonian-workflow.sh  # 全流程自动化驱动脚本
@@ -51,7 +52,7 @@ bash scripts/run-hamiltonian-workflow.sh \
 
 # 组成已存在时，跳过第 1 步从弛豫开始续跑
 bash scripts/run-hamiltonian-workflow.sh \
-  --surface-id Co_13-Cr_13-Fe_13-Mn_12-Ni_13 \
+  --surface-id Co13Cr13Fe13Mn12Ni13 \
   --openmx-data /work/home/<user>/openmx3.9/DFT_DATA19
 
 # 只运行到第 3 步（不做 OpenMX）
@@ -121,7 +122,7 @@ python hea_dataset.py create-sample --root dataset \
 dataset/
   index.sqlite
   dataset_manifest.json
-  Co_13-Cr_13-Fe_13-Mn_12-Ni_13/
+  Co13Cr13Fe13Mn12Ni13/
     manifest.json              # status: created
     structures/
       00_initial_sqs.cif       # 初始 SQS 结构
@@ -145,13 +146,13 @@ dataset/
    - `POSCAR`（含固定底层原子的 F/F/F 标记，`z ∈ [0, 0.46]` 的原子被固定）
    - `INCAR`（来自 `scripts/INCAR-opt` 模板：ENCUT=500, EDIFF=1e-5, EDIFFG=-0.02, NSW=200, IBRION=2）
    - `POTCAR`、`KPOINTS`（Gamma-only）
-   - `vasp-gam.slurm`（job-name 已设为 `surface_id`）
+   - `vasp-cpu.slurm`（默认，job-name 已设为 `surface_id`；可用 `--slurm vasp-dcu.slurm` 切换）
 3. 将 `check-convergence.sh` 复制到该目录。
 4. 初始化 `.gen_count = 1`，提交第一代作业。
 
-#### 2b. 自检自投链（`vasp-gam.slurm`）
+#### 2b. 自检自投链（`vasp-cpu.slurm` / `vasp-dcu.slurm`）
 
-每次 `vasp_gam` 运行结束后，slurm 脚本自动执行以下逻辑：
+每次 VASP 运行结束后，slurm 脚本自动执行以下逻辑：
 
 ```
 mpirun 完成
@@ -287,7 +288,7 @@ workspace/
   <surface_id>/
     slab-relax/
       INCAR  POSCAR  POTCAR  KPOINTS
-      vasp-gam.slurm
+      vasp-cpu.slurm
       check-convergence.sh
       .gen_count
       CONTCAR  OUTCAR  OSZICAR  ...

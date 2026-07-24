@@ -29,6 +29,7 @@
 #       --nh A            N-H bond length for NHx (default: 1.02)
 #       --poll SECONDS    job-state poll interval (default: 60)
 #       --max-gen N       max VASP relaxation generations per site (default: 5)
+#       --slurm FILE      VASP Slurm template basename or path (default: vasp-cpu.slurm)
 #       --skip-detect     reuse an existing fcc_sites.jsonl (skip step 1)
 #       --force           resubmit sites that already carry a terminal marker
 #   -h, --help
@@ -68,6 +69,7 @@ height=1.25
 nh=1.02
 poll=60
 max_gen=5
+slurm_template="vasp-cpu.slurm"
 skip_detect=0
 force=0
 
@@ -99,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         --nh)          nh=$2; shift 2 ;;
         --poll)        poll=$2; shift 2 ;;
         --max-gen)     max_gen=$2; shift 2 ;;
+        --slurm)       slurm_template=$2; shift 2 ;;
         --skip-detect) skip_detect=1; shift ;;
         --force)       force=1; shift ;;
         -h|--help)     awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
@@ -115,6 +118,10 @@ esac
 
 command -v sbatch >/dev/null 2>&1 || die "sbatch not found; run on a Slurm login node."
 [[ -f "${repo_dir}/hea_dataset.py" ]] || die "hea_dataset.py not found in ${repo_dir}."
+
+# Basename of the Slurm template as it lands in each job directory (what sbatch
+# submits). vasp-inputs.sh copies the template there under this same name.
+slurm_name=$(basename -- "$slurm_template")
 
 relaxed_registered="${root}/${surface_id}/structures/01_relaxed_slab.cif"
 [[ -f "$relaxed_registered" ]] || die \
@@ -245,10 +252,10 @@ for s in "${sites[@]}"; do
     chmod +x "${dir}/check-convergence.sh"
     (
         cd "$dir"
-        bash "${script_dir}/vasp-inputs.sh" "$job_cif"
+        bash "${script_dir}/vasp-inputs.sh" "$job_cif" "$slurm_template"
         echo 1 > .gen_count
         rm -f CONVERGED NOT_CONVERGED_MAX_GEN CRASHED SCF_ILL CHECK_ERROR
-        sbatch --export=ALL,MAX_GEN="$max_gen" vasp-gam.slurm
+        sbatch --export=ALL,MAX_GEN="$max_gen" "$slurm_name"
     )
     submitted=$((submitted + 1))
 done

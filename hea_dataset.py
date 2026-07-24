@@ -1386,6 +1386,262 @@ def extract_hamiltonian(args):
 
 
 # ---------------------------------------------------------------------------
+# Completeness check
+# ---------------------------------------------------------------------------
+
+_CHECK_TAG = {"ok": "[OK]     ", "missing": "[MISSING]", "partial": "[PARTIAL]"}
+
+
+def _count_rows(con, table, surface_id):
+    """Return the number of rows a surface owns in ``table`` (0 if absent)."""
+    if con is None:
+        return 0
+    try:
+        row = con.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE surface_id=?", (surface_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 0  # table missing on an older dataset
+    return int(row[0]) if row else 0
+
+
+def _combine_check(label, db_present, disk_present, detail=None):
+    """Fold DB-row presence and on-disk presence into one check outcome.
+
+    ``ok`` when both agree the artifact exists, ``missing`` when both agree it
+    does not, and ``partial`` when the index and the filesystem disagree (an
+    orphan row or an unregistered file) so the inconsistency is surfaced rather
+    than hidden.
+    """
+    if db_present and disk_present:
+        return (label, "ok", detail)
+    if not db_present and not disk_present:
+        return (label, "missing", "not recorded")
+    where = "index only" if db_present else "disk only"
+    return (label, "partial", f"present in {where}")
+
+
+def _fmt_id_list(ids, max_list):
+    ids = list(ids)
+    if max_list and len(ids) > max_list:
+        return ", ".join(ids[:max_list]) + f", ... (+{len(ids) - max_list} more)"
+    return ", ".join(ids)
+
+
+def _check_adsorbate_coverage(con, paths, surface_id, adsorbate, site_ids):
+    """Per-site coverage of one adsorbate: registered config, relaxed structure,
+    and adsorption energy. Returns a dict summarising counts and missing sites."""
+    total = len(site_ids)
+    rows = con.execute(
+        "SELECT site_id, relaxed_cif, adsorption_energy_eV "
+        "FROM adsorbate_configs WHERE surface_id=? AND adsorbate=?",
+        (surface_id, adsorbate),
+    ).fetchall() if con is not None else []
+    by_site = {r[0]: r for r in rows}
+
+    missing_config, missing_struct, missing_energy = [], [], []
+    for site_id in site_ids:
+        row = by_site.get(site_id)
+        if row is None:
+            missing_config.append(site_id)
+            missing_struct.append(site_id)
+            missing_energy.append(site_id)
+            continue
+        relaxed_name = row[1] or "01_relaxed_adsorbate.cif"
+        relaxed_cif = paths["adsorbates"] / adsorbate / site_id / relaxed_name
+        if not relaxed_cif.is_file():
+            missing_struct.append(site_id)
+        if row[2] is None:
+            missing_energy.append(site_id)
+
+    complete = (
+        total > 0
+        and not missing_config and not missing_struct and not missing_energy
+    )
+    return {
+        "adsorbate": adsorbate,
+        "total_sites": total,
+        "registered": total - len(missing_config),
+        "structures": total - len(missing_struct),
+        "energies": total - len(missing_energy),
+        "missing_config": missing_config,
+        "missing_structure": missing_struct,
+        "missing_energy": missing_energy,
+        "complete": complete,
+    }
+
+
+def check_surface(args):
+    """Report completeness of one surface_id and optionally adsorbate coverage.
+
+    Verifies the presence and DB/disk agreement of every workflow product:
+    initial + relaxed structures, slab total energy, top-atom indexing, FCC
+    site detection and the Hamiltonian export. When --adsorbates is given it
+    additionally reports, per species, how many sites carry a registered
+    config, a relaxed structure on disk and an adsorption energy in the index.
+
+    Returns 0 when everything checked is complete, 1 otherwise, so callers can
+    gate on the exit code.
+    """
+    root = args.root
+    surface_id = args.surface_id
+    if not surface_exists(root, surface_id):
+        raise SystemExit(f"[error] Surface not found in dataset: {surface_id}")
+
+    paths = dataset_paths(root, surface_id)
+    db_path = dataset_paths(root)["db"]
+    max_list = args.max_list if args.max_list and args.max_list > 0 else None
+
+    con = sqlite3.connect(db_path) if db_path.is_file() else None
+    try:
+        surf_row = con.execute(
+            "SELECT initial_cif, relaxed_cif, total_energy_eV, status "
+            "FROM surfaces WHERE surface_id=?", (surface_id,)
+        ).fetchone() if con is not None else None
+        db_initial, db_relaxed, db_energy, status = (
+            surf_row if surf_row else (None, None, None, None)
+        )
+
+        checks = []
+        # 1. Initial HEA structure
+        checks.append(_combine_check(
+            "Initial structure registered",
+            db_present=db_initial is not None,
+            disk_present=(paths["structures"] / "00_initial_sqs.cif").is_file(),
+        ))
+        # 2. Relaxed HEA structure
+        checks.append(_combine_check(
+            "Relaxed structure registered",
+            db_present=db_relaxed is not None,
+            disk_present=(paths["structures"] / "01_relaxed_slab.cif").is_file(),
+        ))
+        # 3. Slab total energy (index-only field)
+        checks.append((
+            "Slab total energy in index",
+            "ok" if db_energy is not None else "missing",
+            f"{db_energy:.6f} eV" if db_energy is not None else "not recorded",
+        ))
+        # 4. Surface atoms indexed
+        n_top = _count_rows(con, "top_atoms", surface_id)
+        checks.append(_combine_check(
+            "Surface atoms indexed",
+            db_present=n_top > 0,
+            disk_present=(
+                (paths["metadata"] / "top_atoms.jsonl").is_file()
+                and (paths["metadata"] / "atom_grid.npy").is_file()
+            ),
+            detail=f"{n_top} top atoms",
+        ))
+        # 5. Adsorption sites detected
+        n_sites = _count_rows(con, "fcc_sites", surface_id)
+        checks.append(_combine_check(
+            "Adsorption sites detected",
+            db_present=n_sites > 0,
+            disk_present=(
+                (paths["metadata"] / "fcc_sites.jsonl").is_file()
+                and (paths["metadata"] / "site_grid.npy").is_file()
+            ),
+            detail=f"{n_sites} FCC sites",
+        ))
+        # 6. Hamiltonian matrix
+        n_ham = _count_rows(con, "hamiltonian_exports", surface_id)
+        checks.append(_combine_check(
+            "Hamiltonian matrix stored",
+            db_present=n_ham > 0,
+            disk_present=(
+                paths["openmx_slab"] / "hamiltonian_d_surface.npz"
+            ).is_file(),
+            detail=f"{n_ham} export(s)",
+        ))
+
+        core_complete = all(status_ == "ok" for _, status_, _ in checks)
+
+        # Optional adsorbate coverage
+        adsorbate_reports = []
+        if args.adsorbates:
+            site_ids = [
+                r[0] for r in con.execute(
+                    "SELECT site_id FROM fcc_sites WHERE surface_id=? "
+                    "ORDER BY site_index", (surface_id,)
+                )
+            ] if con is not None else []
+            for adsorbate in args.adsorbates:
+                adsorbate_reports.append(_check_adsorbate_coverage(
+                    con, paths, surface_id, adsorbate, site_ids
+                ))
+        adsorbates_complete = all(r["complete"] for r in adsorbate_reports)
+        overall_complete = core_complete and (
+            adsorbates_complete if adsorbate_reports else True
+        )
+    finally:
+        if con is not None:
+            con.close()
+
+    if args.as_json:
+        report = {
+            "surface_id": surface_id,
+            "status": status,
+            "core_checks": [
+                {"item": label, "status": st, "detail": detail}
+                for label, st, detail in checks
+            ],
+            "core_complete": core_complete,
+            "adsorbates": adsorbate_reports,
+            "adsorbates_complete": adsorbates_complete if adsorbate_reports else None,
+            "complete": overall_complete,
+        }
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if overall_complete else 1
+
+    print("=" * 60)
+    print(f"Surface : {surface_id}")
+    print(f"Status  : {status or 'unknown'}")
+    print("=" * 60)
+    for label, st, detail in checks:
+        line = f"{_CHECK_TAG[st]} {label}"
+        if detail:
+            line += f"  ({detail})"
+        print(line)
+
+    for rep in adsorbate_reports:
+        print("-" * 60)
+        total = rep["total_sites"]
+        tag = "[COMPLETE]" if rep["complete"] else "[INCOMPLETE]"
+        print(
+            f"Adsorbate {rep['adsorbate']:<4s}: "
+            f"configs {rep['registered']}/{total}  "
+            f"structures {rep['structures']}/{total}  "
+            f"energies {rep['energies']}/{total}   {tag}"
+        )
+        if total == 0:
+            print("           no FCC sites to cover (run detect-sites first)")
+            continue
+        if rep["missing_config"]:
+            print("           missing config   : "
+                  + _fmt_id_list(rep["missing_config"], max_list))
+        if rep["missing_structure"]:
+            print("           missing structure: "
+                  + _fmt_id_list(rep["missing_structure"], max_list))
+        if rep["missing_energy"]:
+            print("           missing energy   : "
+                  + _fmt_id_list(rep["missing_energy"], max_list))
+
+    print("=" * 60)
+    if overall_complete:
+        print("Result  : COMPLETE")
+    else:
+        parts = []
+        if not core_complete:
+            n_bad = sum(1 for _, st, _ in checks if st != "ok")
+            parts.append(f"{n_bad} core item(s) missing/inconsistent")
+        if adsorbate_reports and not adsorbates_complete:
+            n_bad = sum(1 for r in adsorbate_reports if not r["complete"])
+            parts.append(f"{n_bad} adsorbate(s) incomplete")
+        print(f"Result  : INCOMPLETE ({'; '.join(parts)})")
+    return 0 if overall_complete else 1
+
+
+# ---------------------------------------------------------------------------
 # Dataset merge
 # ---------------------------------------------------------------------------
 
@@ -1778,6 +2034,28 @@ def build_parser():
     sp.set_defaults(func=extract_hamiltonian)
 
     sp = sub.add_parser(
+        "check",
+        help="Check completeness of a surface (structures, energy, indexing, "
+             "Hamiltonian) and optionally per-adsorbate site coverage.",
+    )
+    add_common_surface_args(sp)
+    sp.add_argument(
+        "-a", "--adsorbates", nargs="+", default=None, metavar="SPECIES",
+        help="Also verify per-site coverage for these adsorbate species, e.g. "
+             "N NH NH2. Each site must have a registered config, a relaxed "
+             "structure on disk and an adsorption energy in the index.",
+    )
+    sp.add_argument(
+        "--max-list", type=int, default=10,
+        help="Max site IDs listed per missing category (0 = list all).",
+    )
+    sp.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="Emit the report as JSON instead of a human-readable table.",
+    )
+    sp.set_defaults(func=check_surface)
+
+    sp = sub.add_parser(
         "delete",
         help="Delete a surface: its index rows and its on-disk directory.",
     )
@@ -1808,8 +2086,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.func(args)
-    return 0
+    rc = args.func(args)
+    # Commands that report a status (e.g. check) return an int exit code;
+    # the rest return None and are treated as success.
+    return rc if isinstance(rc, int) else 0
 
 
 if __name__ == "__main__":
